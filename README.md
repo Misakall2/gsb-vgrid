@@ -1,5 +1,53 @@
 # gsb-vgrid
 
-Vanilla HTML, CSS, JavaScript. No npm.
+原生 HTML/CSS/JavaScript 成交数据虚拟表格。没有 npm、React、Vue 或打包器，也没有后台服务和登录。
 
-Open the page locally. For logic tests use Node built-in test runner if present.
+## 打开页面
+
+直接用浏览器打开：
+
+```bash
+open index.html
+```
+
+也可以在文件管理器里双击 `index.html`。所有脚本都是普通 `<script>`，不依赖 ES module 的网络权限。
+
+## 功能
+
+- 一万行数据只渲染当前视口和少量 overscan 的行，滚动条长度仍按总行数计算。
+- 横向按列宽和偏移量虚拟化，可以滚动查看所有列。
+- 表头 sticky 固定在顶部，首列 sticky 固定在左侧；二者处于同一个滚动容器，斜向滚动共用同一套坐标。
+- 单击或双击单元格、按 Enter/F2 进入编辑；Esc 取消，Enter 或失焦提交。
+- 中文输入法组字期间忽略方向键、回车和 `keyCode === 229` 的事件；`compositionend` 后才落值。组字期间点击另一格，会等组字结束再移动。
+- 方向键移动单元格，Shift + 方向键调整选区，Tab/Shift+Tab 跨行移动。
+- Ctrl/Command+C 或浏览器 copy 事件会把矩形选区输出为 TSV。
+- 选区保存在数据坐标中，不依赖仍存在的 DOM 单元格；滚动回收后再滚回来仍会高亮。
+
+## 页面复现场景
+
+顶部按钮会切换以下状态：
+
+- `一万行`：默认性能场景，状态栏显示当前实际挂载的数据行数量。
+- `空表`：没有数据行时显示空状态，键盘动作不产生越界焦点。
+- `一行`：验证单行边界和 Tab 环绕限制。
+- `超长单元格`：验证长文本裁切和固定行高。
+- `模拟输入法`：自动派发 composition 和键盘事件，验证组字期间按键/点击不会提前落值。
+- `快速连滚`：连续改变纵横滚动位置，验证快速滚动后的窗口行号校准。
+
+## 运行测试
+
+使用 Node 内置 test runner，不安装测试框架：
+
+```bash
+node --test
+```
+
+测试文件在 `test/core.test.js`，覆盖空表、单行、一万行、底部边界、横向列窗口、超长单元格、选区、TSV、滚动定位和 IME 组字状态。
+
+## 代码结构
+
+- `index.html`：页面入口和场景按钮。
+- `src/styles.css`：表格、sticky 表头/首列、编辑器和页面布局。
+- `src/core.js`：虚拟窗口、数据模型、选区、TSV 和编辑状态纯函数。
+- `src/app.js`：DOM 渲染、事件、剪贴板、页面复现场景。
+- `test/core.test.js`：Node 内置单元测试。

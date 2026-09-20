@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>成交虚拟表格</title>
+    <link rel="stylesheet" href="src/styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>成交虚拟表格</h1>
+        <p id="status">正在生成数据...</p>
+      </div>
+      <div class="toolbar" aria-label="测试场景">
+        <button type="button" data-scenario="full">一万行</button>
+        <button type="button" data-scenario="empty">空表</button>
+        <button type="button" data-scenario="single">一行</button>
+        <button type="button" data-scenario="long">超长单元格</button>
+        <button type="button" data-scenario="ime">模拟输入法</button>
+        <button type="button" data-scenario="fast">快速连滚</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section id="grid" class="grid" aria-label="成交数据表格" tabindex="0"></section>
+      <aside class="hints">
+        <h2>操作</h2>
+        <p>方向键移动，Shift + 方向键拉选区，Tab 移动到下一格。</p>
+        <p>双击、按 Enter 或点击当前格进入编辑；Esc 取消，Enter 提交。</p>
+        <p>Ctrl/Command + C 复制选区为 TSV。</p>
+        <p id="scenario-note">默认加载一万行；滚动时只保留窗口附近的 DOM 节点。</p>
+      </aside>
+    </main>
+
+    <script src="src/core.js"></script>
+    <script src="src/app.js"></script>
+  </body>
+</html>
