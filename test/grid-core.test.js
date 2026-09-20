@@ -52,6 +52,48 @@ test('visibleRange: overscan extends but never leaves data bounds', () => {
   assert.equal(bottom.end, 10000);
 });
 
+test('variable rows: empty and one-row tables use valid zero-based offsets', () => {
+  const empty = Core.variableVisibleRange({ heights: [], scrollTop: 999, viewportHeight: 500 });
+  assert.deepEqual(empty, {
+    start: 0, end: 0, offset: 0, totalHeight: 0, maxScroll: 0, tops: [0], heights: [],
+  });
+  const one = Core.variableVisibleRange({
+    heights: [32], scrollTop: 999, viewportHeight: 500, overscan: 0,
+  });
+  assert.equal(one.start, 0);
+  assert.equal(one.end, 1);
+  assert.equal(one.offset, 0);
+  assert.equal(one.totalHeight, 32);
+  assert.equal(one.maxScroll, 0);
+});
+
+test('variable rows: stale scroll offsets are clamped to the shortened range', () => {
+  const range = Core.variableVisibleRange({
+    heights: [32], scrollTop: 32000, viewportHeight: 500, overscan: 0,
+  });
+  assert.equal(range.start, 0);
+  assert.equal(range.end, 1);
+});
+
+test('variable rows: mixed row heights use cumulative data tops', () => {
+  const widths = [80, 120];
+  const rows = [
+    ['short', 'short'],
+    ['short', '这是一段足够在120像素列里换成第二行的中文长文本内容'],
+    ['short', 'short'],
+  ];
+  const heights = Core.rowHeightsForView(rows, [0, 1, 2], widths);
+  assert.deepEqual(heights, [32, 64, 32]);
+  const range = Core.variableVisibleRange({
+    heights, scrollTop: 32, viewportHeight: 64, overscan: 0,
+  });
+  assert.deepEqual(range.tops, [0, 32, 96, 128]);
+  assert.equal(range.start, 1);
+  assert.equal(range.end, 2);
+  assert.equal(range.offset, 32);
+  assert.equal(range.totalHeight, 128);
+});
+
 /* ---------- selection model ---------- */
 
 test('selection: move clamps at grid edges', () => {
@@ -131,6 +173,29 @@ test('toTSV: long cell values are copied in full', () => {
   assert.equal(Core.toTSV(data, sel), long);
 });
 
+test('toTSV: data selection includes the frozen first and last columns without a blank tab', () => {
+  const data = [['frozen-a', 'b', 'last-a'], ['frozen-b', 'd', 'last-b']];
+  const sel = {
+    anchor: { r: 0, c: 2 },
+    focus: { r: 1, c: 0 },
+    rowIds: [0, 1],
+  };
+  const tsv = Core.toTSV(data, sel);
+  assert.equal(tsv, 'frozen-a\tb\tlast-a\nfrozen-b\td\tlast-b');
+  assert.ok(!tsv.includes('\t\n'));
+  assert.ok(!tsv.endsWith('\t'));
+});
+
+test('toTSV: quotes tabs and newlines so selected dimensions stay intact', () => {
+  const data = [['a\tb', 'line\n2', 'say "x"']];
+  const sel = {
+    anchor: { r: 0, c: 0 },
+    focus: { r: 0, c: 2 },
+    rowIds: [0],
+  };
+  assert.equal(Core.toTSV(data, sel), '"a\tb"\t"line\n2"\t"say ""x"""');
+});
+
 /* ---------- editor key state machine ---------- */
 
 test('editor: during IME composition no key commits or moves', () => {
@@ -145,6 +210,14 @@ test('editor: plain keys commit/cancel/move when not composing', () => {
   assert.equal(Core.editorKeyAction('Tab', false), 'commit-tab');
   assert.equal(Core.editorKeyAction('ArrowDown', false), 'commit-down');
   assert.equal(Core.editorKeyAction('x', false), 'none');
+});
+
+test('editor: IME composition only repositions on scroll/recycle and defers cell clicks', () => {
+  assert.equal(Core.compositionEventPolicy('scroll', true), 'reposition');
+  assert.equal(Core.compositionEventPolicy('recycle', true), 'reposition');
+  assert.equal(Core.compositionEventPolicy('click', true), 'defer-commit');
+  assert.equal(Core.compositionEventPolicy('ArrowDown', true), 'none');
+  assert.equal(Core.compositionEventPolicy('click', false), 'normal');
 });
 
 /* ---------- data generation ---------- */

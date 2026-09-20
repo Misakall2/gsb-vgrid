@@ -38,6 +38,7 @@
   const canvas = document.getElementById('canvas');
   const headerEl = document.getElementById('header');
   const groupBar = document.getElementById('groupBar');
+  const editorLayer = document.getElementById('editorLayer');
   const emptyEl = document.getElementById('empty');
   const statusEl = document.getElementById('status');
 
@@ -49,19 +50,54 @@
   let groups = null;
   let groupedView = null;
   let visibleRowIds = filteredRowIds;
+  let rowHeights = Core.rowHeightsForView(data, visibleRowIds, widths);
+  let rowLayout = null;
   let sel = ROW_COUNT ? Core.createDataSelection(0, 0) : {
     anchor: { r: 0, c: 0 }, focus: { r: 0, c: 0 }, rowIds: [],
   };
   const rowEls = new Map();
   const groupEls = new Map();
   const editor = {
-    open: false, r: 0, c: 0, input: null, composing: false, commitOnBlur: false,
+    open: false, r: 0, c: 0, input: null, composing: false, commitOnBlur: false, pendingFocus: null,
   };
 
   function colLeft(c) { return metrics.lefts[c]; }
   function visibleDataHeight() {
+    if (rowLayout && groupColumn == null) return rowLayout.totalHeight;
     if (groupColumn == null) return filteredRowIds.length * ROW_H;
     return groupedView ? groupedView.totalHeight : 0;
+  }
+
+  function rebuildRowMetrics(rowIds) {
+    rowHeights = Core.rowHeightsForView(data, rowIds || visibleRowIds, widths);
+    rowLayout = Core.variableVisibleRange({
+      heights: rowHeights,
+      scrollTop: grid.scrollTop,
+      viewportHeight: grid.clientHeight,
+    });
+  }
+
+  function clampScrollPosition() {
+    const maxTop = Math.max(0, visibleDataHeight() - (grid.clientHeight - HEADER_H));
+    const maxLeft = Math.max(0, metrics.totalWidth - grid.clientWidth);
+    grid.scrollTop = Math.min(grid.scrollTop, maxTop);
+    grid.scrollLeft = Math.min(grid.scrollLeft, maxLeft);
+  }
+
+  function heightById() {
+    const map = {};
+    visibleRowIds.forEach(function (rowId, i) { map[rowId] = rowHeights[i]; });
+    return map;
+  }
+
+  function rowTopForId(rowId) {
+    const viewIdx = visibleRowIds.indexOf(rowId);
+    if (viewIdx === -1) return null;
+    if (groupColumn != null) {
+      const found = findRowInGroups(rowId);
+      return found ? found.group.rowTop(found.rowIndex) : null;
+    }
+    return !rowLayout ? null : rowLayout.tops[viewIdx];
   }
 
   function rebuildModel(options) {
@@ -75,11 +111,16 @@
         if (collapsed.has(group.key)) nextCollapsed.add(group.key);
       });
       collapsed = nextCollapsed;
+      visibleRowIds = groups.reduce(function (ids, group) {
+        return nextCollapsed.has(group.key) ? ids : ids.concat(group.rowIds);
+      }, []);
+      rebuildRowMetrics();
       groupedView = Core.visibleGroupedRows({
         groups: groups,
         collapsed: collapsed,
         scrollTop: preserveScroll ? top : 0,
         viewportHeight: grid.clientHeight,
+        heightById: heightById(),
       });
       visibleRowIds = groupedView.groups.reduce(function (ids, group) {
         return group.collapsed ? ids : ids.concat(group.rowIds);
@@ -87,21 +128,50 @@
     } else {
       groupedView = null;
       visibleRowIds = filteredRowIds;
+      rebuildRowMetrics();
     }
     reconcileSelection();
-    if (!preserveScroll) grid.scrollTop = 0;
+    if (!preserveScroll) {
+      grid.scrollTop = 0;
+      grid.scrollLeft = 0;
+    }
     layoutCanvas();
+    clampScrollPosition();
     render();
   }
 
   function reconcileSelection() {
     if (!sel || !sel.rowIds) return;
     const visibleSet = new Set(visibleRowIds);
-    const rowIds = (sel.rowIds || []).filter(function (id) { return visibleSet.has(id); });
+    const hasAnchor = visibleSet.has(sel.anchor.r);
+    const hasFocus = visibleSet.has(sel.focus.r);
+    if (hasAnchor && hasFocus) {
+      const anchorIdx = visibleRowIds.indexOf(sel.anchor.r);
+      const focusIdx = visibleRowIds.indexOf(sel.focus.r);
+      const start = Math.min(anchorIdx, focusIdx);
+      const end = Math.max(anchorIdx, focusIdx);
+      sel.rowIds = visibleRowIds.slice(start, end + 1);
+      return;
+    }
+
+    const anchorIdx = visibleRowIds.indexOf(sel.anchor.r);
+    const focusIdx = visibleRowIds.indexOf(sel.focus.r);
+    const startIdx = anchorIdx === -1 ? focusIdx : anchorIdx;
+    const endIdx = focusIdx === -1 ? anchorIdx : focusIdx;
+    if (startIdx === -1 || endIdx === -1) {
+      sel = {
+        anchor: { r: 0, c: Math.max(0, sel.focus.c) },
+        focus: { r: 0, c: Math.max(0, sel.focus.c) },
+        rowIds: [],
+      };
+      return;
+    }
+    const start = Math.min(startIdx, endIdx);
+    const end = Math.max(startIdx, endIdx);
     sel = {
-      anchor: { r: sel.anchor.r, c: sel.anchor.c },
-      focus: { r: sel.focus.r, c: sel.focus.c },
-      rowIds: rowIds,
+      anchor: { r: visibleRowIds[start], c: sel.anchor.c },
+      focus: { r: visibleRowIds[end], c: sel.focus.c },
+      rowIds: visibleRowIds.slice(start, end + 1),
     };
   }
 
@@ -123,7 +193,7 @@
     rebuildModel({ preserveScroll: true });
     editor.suspendBlur = false;
     if (editor.open && rowEls.has(editor.r)) {
-      mountEditor(rowEls.get(editor.r));
+      mountEditor();
       editor.input.focus();
     }
   }
@@ -214,9 +284,19 @@
 
   function buildRow(item) {
     const rowId = item.rowId;
+    let h = ROW_H;
+    if (groupColumn == null) {
+      const idx = filteredRowIds.indexOf(rowId);
+      h = rowHeights[idx];
+    } else {
+      const found = findRowInGroups(rowId);
+      if (found) h = found.group.rowHeights[found.rowIndex];
+    }
     const rowEl = document.createElement('div');
     rowEl.className = 'row';
+    rowEl.dataset.r = rowId;
     rowEl.style.top = (HEADER_H + item.top) + 'px';
+    rowEl.style.height = h + 'px';
     rowEl.style.width = metrics.totalWidth + 'px';
     for (let c = 0; c < COL_COUNT; c++) rowEl.appendChild(buildCell(rowId, c));
     return rowEl;
@@ -259,7 +339,7 @@
   function renderUngrouped(range) {
     for (let r = range.start; r < range.end; r++) {
       const rowId = filteredRowIds[r];
-      const rowEl = buildRow({ rowId: rowId, top: r * ROW_H });
+      const rowEl = buildRow({ rowId: rowId, top: range.tops[r] });
       canvas.appendChild(rowEl);
       rowEls.set(rowId, rowEl);
     }
@@ -298,11 +378,12 @@
   function render() {
     clearRows();
     if (groupColumn == null) {
-      const range = Core.visibleRange({
+      const range = Core.variableVisibleRange({
+        heights: rowHeights,
         scrollTop: grid.scrollTop,
         viewportHeight: grid.clientHeight,
-        rowCount: filteredRowIds.length,
       });
+      rowLayout = range;
       renderUngrouped(range);
       groupBar.hidden = true;
       groupBar.replaceChildren();
@@ -312,15 +393,12 @@
         collapsed: collapsed,
         scrollTop: grid.scrollTop,
         viewportHeight: grid.clientHeight,
+        heightById: heightById(),
       });
       renderGrouped();
       renderGroupBar();
     }
-    if (editor.open) {
-      if (rowEls.has(editor.r)) mountEditor(rowEls.get(editor.r));
-      else if (!editor.preserveHidden) commitEditor();
-    }
-    editor.preserveHidden = false;
+    if (editor.open) positionEditor();
     emptyEl.hidden = visibleRowIds.length !== 0;
     emptyEl.textContent = ROW_COUNT === 0 ? '暂无成交数据' : '没有符合筛选条件的数据';
     updateStatus();
@@ -335,6 +413,7 @@
 
   function relayoutVisibleRows() {
     metrics = Core.columnMetrics(widths);
+    rebuildRowMetrics();
     headerEl.style.width = metrics.totalWidth + 'px';
     canvas.style.width = metrics.totalWidth + 'px';
     canvas.style.height = (HEADER_H + visibleDataHeight()) + 'px';
@@ -343,12 +422,18 @@
     }
     rowEls.forEach(function (rowEl) {
       rowEl.style.width = metrics.totalWidth + 'px';
+      const rowId = Number(rowEl.dataset.r);
+      const top = rowTopForId(rowId);
+      const idx = visibleRowIds.indexOf(rowId);
+      if (top != null) rowEl.style.top = (HEADER_H + top) + 'px';
+      if (idx !== -1) rowEl.style.height = rowHeights[idx] + 'px';
       for (let c = 0; c < rowEl.children.length; c++) applyCellLayout(rowEl.children[c], c);
     });
     groupEls.forEach(function (el) {
       el.style.width = 'max(' + metrics.totalWidth + 'px, 100%)';
     });
     if (groupedView) renderGroupBar();
+    if (editor.open) positionEditor();
   }
 
   function updateStatus() {
@@ -359,32 +444,31 @@
       (visibleRowIds.length ? ' · 选区 ' + rows + ' 行 × ' + cols + ' 列' : '');
   }
 
-  let ticking = false;
   grid.addEventListener('scroll', function () {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () {
-      ticking = false;
-      render();
-    });
+    render();
   });
 
   function ensureVisible(rowId, c) {
     let top = 0;
+    let h = ROW_H;
     if (groupColumn != null) {
       const found = findRowInGroups(rowId);
       if (!found) return;
       top = found.group.rowTop(found.rowIndex);
+      h = found.group.rowHeights[found.rowIndex];
     } else {
-      const idx = filteredRowIds.indexOf(rowId);
+      const idx = visibleRowIds.indexOf(rowId);
       if (idx === -1) return;
-      top = idx * ROW_H;
+      top = rowLayout.tops[idx];
+      h = rowHeights[idx];
     }
-    const bottom = top + ROW_H;
+    const bottom = top + h;
     const viewTop = grid.scrollTop;
     const viewBottom = grid.scrollTop + grid.clientHeight - HEADER_H;
-    if (top < viewTop) grid.scrollTop = top - GROUP_H;
-    else if (bottom > viewBottom) grid.scrollTop = bottom - (grid.clientHeight - HEADER_H);
+    if (top < viewTop) grid.scrollTop = Math.max(0, top - GROUP_H);
+    else if (bottom > viewBottom) {
+      grid.scrollTop = Math.max(0, bottom - (grid.clientHeight - HEADER_H));
+    }
 
     if (c > 0) {
       const left = colLeft(c);
@@ -400,7 +484,19 @@
   function afterMove() {
     ensureVisible(sel.focus.r, sel.focus.c);
     render();
-    grid.focus();
+    if (document.activeElement !== grid) grid.focus({ preventScroll: true });
+  }
+
+  function focusFirstVisibleCell() {
+    if (!visibleRowIds.length) return;
+    const range = Core.variableVisibleRange({
+      heights: rowHeights,
+      scrollTop: grid.scrollTop,
+      viewportHeight: grid.clientHeight,
+      overscan: 0,
+    });
+    const idx = Math.min(range.start, visibleRowIds.length - 1);
+    sel = Core.createDataSelection(visibleRowIds[idx], 0);
   }
 
   function move(dr, dc, extend) {
@@ -411,10 +507,26 @@
   grid.addEventListener('keydown', function (e) {
     if (editor.open) return;
     switch (e.key) {
-      case 'ArrowUp': move(-1, 0, e.shiftKey); e.preventDefault(); break;
-      case 'ArrowDown': move(1, 0, e.shiftKey); e.preventDefault(); break;
-      case 'ArrowLeft': move(0, -1, e.shiftKey); e.preventDefault(); break;
-      case 'ArrowRight': move(0, 1, e.shiftKey); e.preventDefault(); break;
+      case 'ArrowUp':
+        if (!rowEls.has(sel.focus.r)) focusFirstVisibleCell();
+        else move(-1, 0, e.shiftKey);
+        e.preventDefault();
+        break;
+      case 'ArrowDown':
+        if (!rowEls.has(sel.focus.r)) focusFirstVisibleCell();
+        else move(1, 0, e.shiftKey);
+        e.preventDefault();
+        break;
+      case 'ArrowLeft':
+        if (!rowEls.has(sel.focus.r)) focusFirstVisibleCell();
+        else move(0, -1, e.shiftKey);
+        e.preventDefault();
+        break;
+      case 'ArrowRight':
+        if (!rowEls.has(sel.focus.r)) focusFirstVisibleCell();
+        else move(0, 1, e.shiftKey);
+        e.preventDefault();
+        break;
       case 'Tab':
         sel = Core.tabNextData(sel, visibleRowIds, COL_COUNT, e.shiftKey);
         afterMove();
@@ -441,7 +553,7 @@
     if (editor.open && editor.r === r && editor.c === c) return;
     sel = Core.createDataSelection(r, c);
     render();
-    grid.focus();
+    grid.focus({ preventScroll: true });
   });
 
   canvas.addEventListener('dblclick', function (e) {
@@ -456,15 +568,41 @@
 
   document.addEventListener('copy', function (e) {
     if (editor.open || document.activeElement !== grid) return;
+    if (!sel.rowIds || !sel.rowIds.length) return;
     e.clipboardData.setData('text/plain', Core.toTSV(data, sel));
     e.preventDefault();
   });
 
   function mountEditor(rowEl) {
-    if (!rowEl || !editor.input) return;
-    const cell = rowEl.children[editor.c];
-    cell.classList.add('editing');
-    cell.appendChild(editor.input);
+    if (!editor.input) return;
+    if (editor.input.parentElement !== editorLayer) editorLayer.appendChild(editor.input);
+    positionEditor();
+  }
+
+  function positionEditor() {
+    if (!editor.open || !editor.input) return;
+    if (!rowEls.has(editor.r)) {
+      editor.input.style.top = '-9999px';
+      return;
+    }
+    const idx = visibleRowIds.indexOf(editor.r);
+    const top = idx === -1 ? null : (
+      groupColumn != null
+        ? (function () {
+            const found = findRowInGroups(editor.r);
+            return found ? found.group.rowTop(found.rowIndex) : null;
+          })()
+        : rowLayout.tops[idx]
+    );
+    const h = idx === -1 ? ROW_H : rowHeights[idx];
+    if (top == null) {
+      editor.input.hidden = true;
+      return;
+    }
+    editor.input.style.top = (HEADER_H + top) + 'px';
+    editor.input.style.left = colLeft(editor.c) + 'px';
+    editor.input.style.width = widths[editor.c] + 'px';
+    editor.input.style.height = h + 'px';
   }
 
   function openEditor() {
@@ -482,7 +620,7 @@
     input.value = data[r][c];
     editor.input = input;
     bindEditorEvents(input);
-    mountEditor(rowEls.get(r));
+    mountEditor();
     input.focus();
     input.select();
   }
@@ -493,6 +631,7 @@
     editor.open = false;
     editor.composing = false;
     editor.commitOnBlur = false;
+    editor.pendingFocus = null;
     editor.input.remove();
     editor.input = null;
   }
@@ -502,6 +641,7 @@
     editor.open = false;
     editor.composing = false;
     editor.commitOnBlur = false;
+    editor.pendingFocus = null;
     editor.input.remove();
     editor.input = null;
   }
@@ -514,9 +654,18 @@
       editor.composing = false;
       if (editor.commitOnBlur) {
         editor.commitOnBlur = false;
-        commitEditor();
-        render();
-        grid.focus();
+        if (editor.pendingFocus) {
+          const target = editor.pendingFocus;
+          editor.pendingFocus = null;
+          commitEditor();
+          sel = Core.createDataSelection(target.r, target.c);
+          ensureVisible(target.r, target.c);
+          render();
+        } else {
+          commitEditor();
+          render();
+          grid.focus({ preventScroll: true });
+        }
       }
     });
     input.addEventListener('keydown', function (e) {
@@ -528,7 +677,7 @@
       if (action === 'cancel') {
         cancelEditor();
         render();
-        grid.focus();
+        grid.focus({ preventScroll: true });
         return;
       }
       commitEditor();
@@ -550,6 +699,20 @@
       render();
     });
   }
+
+  canvas.addEventListener('mousedown', function (e) {
+    if (!editor.open || !editor.composing) return;
+    const cell = e.target.closest('.cell');
+    if (!cell || headerEl.contains(cell)) return;
+    const r = Number(cell.dataset.r);
+    const c = Number(cell.dataset.c);
+    if (!isNaN(r) && !isNaN(c)) {
+      editor.pendingFocus = { r: r, c: c };
+      editor.commitOnBlur = true;
+      e.preventDefault();
+      editor.input.focus();
+    }
+  });
 
   /* Column resizing changes CSS dimensions only. Rows are not rebuilt, which
      keeps a cell input mounted and lets an IME composition continue. */
@@ -582,6 +745,7 @@
 
   populateControls();
   buildHeader();
+  rebuildRowMetrics();
   layoutCanvas();
   emptyEl.hidden = ROW_COUNT !== 0;
   render();

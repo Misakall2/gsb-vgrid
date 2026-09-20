@@ -36,6 +36,73 @@
     return { start: start, end: end, offset: start * rowHeight, totalHeight: totalHeight };
   }
 
+  function estimateLineCount(value, width) {
+    const text = value == null ? '' : String(value);
+    if (!text) return 1;
+    const available = Math.max(16, width - 16);
+    let textWidth = 0;
+    for (const ch of text) {
+      if (ch.charCodeAt(0) < 128) textWidth += 7;
+      else textWidth += 13;
+    }
+    return Math.max(1, Math.ceil(textWidth / available));
+  }
+
+  /* Cells clamp wrapped text to two visual lines. The virtual layout therefore
+   * needs a data-level height instead of assuming every row is 32px. */
+  function rowHeight(row, widths, fallbackRow) {
+    if (!row || !widths || !widths.length) return fallbackRow == null ? ROW_H : fallbackRow;
+    let wraps = false;
+    for (let c = 0; c < widths.length; c++) {
+      if (estimateLineCount(row[c], widths[c]) > 1) {
+        wraps = true;
+        break;
+      }
+    }
+    return wraps ? ROW_H * 2 : ROW_H;
+  }
+
+  function rowHeightsForView(data, rowIds, widths) {
+    return (rowIds || []).map(function (rowId) {
+      return rowHeight(data[rowId], widths);
+    });
+  }
+
+  function variableVisibleRange(opts) {
+    const heights = opts.heights;
+    if (!heights || !heights.length) {
+      return {
+        start: 0, end: 0, offset: 0, totalHeight: 0, maxScroll: 0,
+        tops: [0], heights: [],
+      };
+    }
+    const viewportHeight = opts.viewportHeight;
+    const overscan = opts.overscan == null ? 4 : opts.overscan;
+    const tops = [0];
+    for (let i = 0; i < heights.length; i++) tops.push(tops[i] + heights[i]);
+    const totalHeight = tops[heights.length];
+    const maxScroll = Math.max(0, totalHeight - viewportHeight);
+    const st = clamp(opts.scrollTop || 0, 0, maxScroll);
+    const bottom = st + viewportHeight;
+
+    let first = 0;
+    while (first < heights.length && tops[first + 1] <= st) first++;
+    let last = first;
+    while (last < heights.length && tops[last] < bottom) last++;
+
+    const start = clamp(first - overscan, 0, heights.length);
+    const end = clamp(last + overscan, 0, heights.length);
+    return {
+      start: start,
+      end: end,
+      offset: tops[start],
+      totalHeight: totalHeight,
+      maxScroll: maxScroll,
+      tops: tops,
+      heights: heights.slice(),
+    };
+  }
+
   function columnMetrics(widths) {
     const lefts = [0];
     for (let i = 0; i < widths.length; i++) lefts.push(lefts[i] + widths[i]);
@@ -118,7 +185,11 @@
       const cells = [];
       for (let c = n.c1; c <= n.c2; c++) {
         const v = data[r] ? data[r][c] : null;
-        cells.push(v == null ? '' : String(v));
+        let text = v == null ? '' : String(v);
+        if (/[\t\n\r"]/.test(text)) {
+          text = '"' + text.replace(/"/g, '""') + '"';
+        }
+        cells.push(text);
       }
       lines.push(cells.join('\t'));
     }
@@ -153,10 +224,10 @@
     let next = idx + dr;
     if (next < 0) {
       next = 0;
-      c = 0;
+      if (!extend) c = 0;
     } else if (next >= visibleRowIds.length) {
       next = visibleRowIds.length - 1;
-      c = columnCount - 1;
+      if (!extend) c = columnCount - 1;
     }
     const focus = { r: visibleRowIds[next], c: c };
     if (!extend) return { anchor: focus, focus: focus, rowIds: [focus.r] };
@@ -221,19 +292,32 @@
     });
   }
 
-  function layoutGroups(groups, collapsed) {
+  function layoutGroups(groups, collapsed, heightById) {
     let top = 0;
     return groups.map(function (group, index) {
       const groupTop = top;
       const isCollapsed = !!(collapsed && collapsed.has && collapsed.has(group.key));
-      const height = GROUP_H + (isCollapsed ? 0 : group.count * ROW_H);
+      const rowTops = [];
+      const rowHeights = [];
+      let rowsHeight = 0;
+      if (!isCollapsed) {
+        for (const rowId of group.rowIds) {
+          rowTops.push(rowsHeight);
+          const h = heightById ? heightById[rowId] : ROW_H;
+          rowHeights.push(h || ROW_H);
+          rowsHeight += h || ROW_H;
+        }
+      }
+      const height = GROUP_H + (isCollapsed ? 0 : rowsHeight);
       const laid = Object.assign({}, group, {
         index: index,
         top: groupTop,
         height: height,
         bottom: groupTop + height,
         collapsed: isCollapsed,
-        rowTop: function (rowIndex) { return groupTop + GROUP_H + rowIndex * ROW_H; },
+        rowTops: rowTops,
+        rowHeights: rowHeights,
+        rowTop: function (rowIndex) { return groupTop + GROUP_H + rowTops[rowIndex]; },
       });
       top = groupTop + height;
       return laid;
@@ -241,7 +325,7 @@
   }
 
   function visibleGroupedRows(opts) {
-    const groups = layoutGroups(opts.groups || [], opts.collapsed);
+    const groups = layoutGroups(opts.groups || [], opts.collapsed, opts.heightById);
     if (!groups.length) {
       return { items: [], groups: groups, currentGroup: null, totalHeight: 0, maxScroll: 0 };
     }
@@ -268,8 +352,14 @@
       }
       if (!group.collapsed) {
         const localTop = st - group.top - GROUP_H;
-        const start = clamp(Math.floor(localTop / ROW_H) - overscan, 0, group.count);
-        const end = clamp(Math.ceil((localTop + viewH) / ROW_H) + overscan, 0, group.count);
+        let start = 0;
+        while (start < group.count &&
+          group.rowTops[start] + group.rowHeights[start] <= localTop) start++;
+        let end = start;
+        const localBottom = localTop + viewH;
+        while (end < group.count && group.rowTops[end] < localBottom) end++;
+        start = clamp(start - overscan, 0, group.count);
+        end = clamp(end + overscan, 0, group.count);
         for (let i = Math.max(0, start); i < Math.max(0, end); i++) {
           items.push({ type: 'row', group: group.index, rowIndex: i,
             rowId: group.rowIds[i], top: group.rowTop(i) });
@@ -282,6 +372,13 @@
 
   function filterInputValue(current, input, composing) {
     return composing ? current : String(input == null ? '' : input).trim();
+  }
+
+  function compositionEventPolicy(type, composing) {
+    if (!composing) return 'normal';
+    if (type === 'scroll' || type === 'recycle') return 'reposition';
+    if (type === 'click' || type === 'blur') return 'defer-commit';
+    return 'none';
   }
 
   /* Key handling while the cell editor is open. Between compositionstart and
@@ -357,6 +454,10 @@
     MIN_COL_WIDTH: MIN_COL_WIDTH,
     clamp: clamp,
     visibleRange: visibleRange,
+    variableVisibleRange: variableVisibleRange,
+    estimateLineCount: estimateLineCount,
+    rowHeight: rowHeight,
+    rowHeightsForView: rowHeightsForView,
     columnMetrics: columnMetrics,
     resizeColumn: resizeColumn,
     createSelection: createSelection,
@@ -376,6 +477,7 @@
     visibleGroupedRows: visibleGroupedRows,
     filterInputValue: filterInputValue,
     editorKeyAction: editorKeyAction,
+    compositionEventPolicy: compositionEventPolicy,
     generateData: generateData,
   };
 });
