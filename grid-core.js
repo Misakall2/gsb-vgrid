@@ -9,6 +9,8 @@
 
   const ROW_H = 32;
   const HEADER_H = 36;
+  const GROUP_H = 32;
+  const MIN_COL_WIDTH = 48;
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -34,6 +36,20 @@
     return { start: start, end: end, offset: start * rowHeight, totalHeight: totalHeight };
   }
 
+  function columnMetrics(widths) {
+    const lefts = [0];
+    for (let i = 0; i < widths.length; i++) lefts.push(lefts[i] + widths[i]);
+    return { lefts: lefts, totalWidth: lefts[widths.length] || 0 };
+  }
+
+  function resizeColumn(widths, index, deltaX, minWidth) {
+    const next = widths.slice();
+    const min = minWidth == null ? MIN_COL_WIDTH : minWidth;
+    if (index < 0 || index >= next.length) return next;
+    next[index] = Math.max(min, next[index] + deltaX);
+    return next;
+  }
+
   /* Selection lives purely as data ({anchor, focus}) so it survives DOM
    * recycling: re-rendered rows just re-ask isSelected(). */
   function createSelection(r, c) {
@@ -50,9 +66,27 @@
     };
   }
 
-  function isSelected(sel, r, c) {
+  function isSelectedLegacy(sel, r, c) {
     const n = normalizeSelection(sel);
     return r >= n.r1 && r <= n.r2 && c >= n.c1 && c <= n.c2;
+  }
+
+  function createDataSelection(rowId, c) {
+    const focus = { r: rowId || 0, c: c || 0 };
+    return {
+      anchor: { r: rowId || 0, c: c || 0 },
+      focus: focus,
+      rowIds: [rowId || 0],
+    };
+  }
+
+  function isColumnSelected(sel, c) {
+    const n = normalizeSelection(sel);
+    return c >= n.c1 && c <= n.c2;
+  }
+
+  function isDataRowSelected(sel, rowId) {
+    return sel && sel.rowIds && sel.rowIds.indexOf(rowId) !== -1;
   }
 
   function moveFocus(sel, dr, dc, bounds, extend) {
@@ -78,8 +112,9 @@
 
   function toTSV(data, sel) {
     const n = normalizeSelection(sel);
+    const rowIds = selectionRowIds(sel);
     const lines = [];
-    for (let r = n.r1; r <= n.r2; r++) {
+    for (const r of rowIds) {
       const cells = [];
       for (let c = n.c1; c <= n.c2; c++) {
         const v = data[r] ? data[r][c] : null;
@@ -88,6 +123,165 @@
       lines.push(cells.join('\t'));
     }
     return lines.join('\n');
+  }
+
+  function selectionRowIds(sel) {
+    if (sel && sel.rowIds) return sel.rowIds.slice();
+    const n = normalizeSelection(sel);
+    const rows = [];
+    for (let r = n.r1; r <= n.r2; r++) rows.push(r);
+    return rows;
+  }
+
+  function isSelected(sel, r, c) {
+    if (sel && sel.rowIds) return sel.rowIds.indexOf(r) !== -1 && isColumnSelected(sel, c);
+    return isSelectedLegacy(sel, r, c);
+  }
+
+  function visibleFocus(sel, visibleRowIds, columnCount) {
+    if (!visibleRowIds.length || columnCount <= 0) return null;
+    const idx = sel ? visibleRowIds.indexOf(sel.focus.r) : -1;
+    if (idx !== -1) return { rowId: sel.focus.r, c: clamp(sel.focus.c, 0, columnCount - 1) };
+    return { rowId: visibleRowIds[0], c: sel ? clamp(sel.focus.c, 0, columnCount - 1) : 0 };
+  }
+
+  function moveDataSelection(sel, dr, dc, visibleRowIds, columnCount, extend) {
+    if (!visibleRowIds.length || columnCount <= 0) return sel;
+    let idx = visibleRowIds.indexOf(sel.focus.r);
+    if (idx === -1) idx = dr < 0 ? visibleRowIds.length - 1 : 0;
+    let c = clamp(sel.focus.c + dc, 0, columnCount - 1);
+    let next = idx + dr;
+    if (next < 0) {
+      next = 0;
+      c = 0;
+    } else if (next >= visibleRowIds.length) {
+      next = visibleRowIds.length - 1;
+      c = columnCount - 1;
+    }
+    const focus = { r: visibleRowIds[next], c: c };
+    if (!extend) return { anchor: focus, focus: focus, rowIds: [focus.r] };
+    const anchorIdx = visibleRowIds.indexOf(sel.anchor.r);
+    if (anchorIdx === -1) return { anchor: focus, focus: focus, rowIds: [focus.r] };
+    const start = Math.min(anchorIdx, next);
+    const end = Math.max(anchorIdx, next);
+    return {
+      anchor: { r: sel.anchor.r, c: sel.anchor.c },
+      focus: focus,
+      rowIds: visibleRowIds.slice(start, end + 1),
+    };
+  }
+
+  function tabNextData(sel, visibleRowIds, columnCount, backwards) {
+    if (!visibleRowIds.length || columnCount <= 0) return sel;
+    let rowIdx = visibleRowIds.indexOf(sel.focus.r);
+    if (rowIdx === -1) rowIdx = backwards ? visibleRowIds.length - 1 : 0;
+    let linear = rowIdx * columnCount + sel.focus.c + (backwards ? -1 : 1);
+    linear = clamp(linear, 0, visibleRowIds.length * columnCount - 1);
+    const focus = {
+      r: visibleRowIds[Math.floor(linear / columnCount)],
+      c: linear % columnCount,
+    };
+    return { anchor: focus, focus: focus, rowIds: [focus.r] };
+  }
+
+  function filterRows(data, filters) {
+    const active = (filters || []).filter(function (f) {
+      return f && f.column != null && String(f.keyword == null ? '' : f.keyword).trim();
+    }).map(function (f) {
+      return { column: f.column, keyword: String(f.keyword).trim().toLowerCase() };
+    });
+    const ids = [];
+    for (let r = 0; r < data.length; r++) {
+      let ok = true;
+      for (const f of active) {
+        const v = data[r][f.column];
+        if (v == null || String(v).toLowerCase().indexOf(f.keyword) === -1) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) ids.push(r);
+    }
+    return ids;
+  }
+
+  function groupRows(data, rowIds, column) {
+    if (column == null || column < 0) return null;
+    const map = new Map();
+    for (const rowId of rowIds) {
+      const key = data[rowId][column] == null ? '' : String(data[rowId][column]);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(rowId);
+    }
+    return Array.from(map.keys()).sort(function (a, b) {
+      return a.localeCompare(b, 'zh-Hans-CN');
+    }).map(function (key) {
+      const rows = map.get(key);
+      return { key: key, rowIds: rows, count: rows.length };
+    });
+  }
+
+  function layoutGroups(groups, collapsed) {
+    let top = 0;
+    return groups.map(function (group, index) {
+      const groupTop = top;
+      const isCollapsed = !!(collapsed && collapsed.has && collapsed.has(group.key));
+      const height = GROUP_H + (isCollapsed ? 0 : group.count * ROW_H);
+      const laid = Object.assign({}, group, {
+        index: index,
+        top: groupTop,
+        height: height,
+        bottom: groupTop + height,
+        collapsed: isCollapsed,
+        rowTop: function (rowIndex) { return groupTop + GROUP_H + rowIndex * ROW_H; },
+      });
+      top = groupTop + height;
+      return laid;
+    });
+  }
+
+  function visibleGroupedRows(opts) {
+    const groups = layoutGroups(opts.groups || [], opts.collapsed);
+    if (!groups.length) {
+      return { items: [], groups: groups, currentGroup: null, totalHeight: 0, maxScroll: 0 };
+    }
+    const totalHeight = groups[groups.length - 1].bottom;
+    const headerHeight = opts.headerHeight == null ? HEADER_H : opts.headerHeight;
+    const maxScroll = Math.max(0, totalHeight - Math.max(0, opts.viewportHeight - headerHeight));
+    const st = clamp(opts.scrollTop || 0, 0, maxScroll);
+    const viewH = Math.max(ROW_H, opts.viewportHeight - headerHeight - GROUP_H);
+    const overscan = opts.overscan == null ? 4 : opts.overscan;
+    const padPx = overscan * ROW_H;
+    const topEdge = st - padPx;
+    const bottomEdge = st + viewH + padPx;
+    const items = [];
+    let current = groups[0];
+    for (const group of groups) {
+      if (group.bottom < topEdge || group.top > bottomEdge) {
+        if (group.top <= st) current = group;
+        continue;
+      }
+      if (group.top <= st) current = group;
+      if (group.top >= st) {
+        items.push({ type: 'group', group: group.index, key: group.key, top: group.top,
+          height: GROUP_H, count: group.count, collapsed: group.collapsed });
+      }
+      if (!group.collapsed) {
+        const localTop = st - group.top - GROUP_H;
+        const start = clamp(Math.floor(localTop / ROW_H) - overscan, 0, group.count);
+        const end = clamp(Math.ceil((localTop + viewH) / ROW_H) + overscan, 0, group.count);
+        for (let i = Math.max(0, start); i < Math.max(0, end); i++) {
+          items.push({ type: 'row', group: group.index, rowIndex: i,
+            rowId: group.rowIds[i], top: group.rowTop(i) });
+        }
+      }
+    }
+    items.sort(function (a, b) { return a.top - b.top || (a.type === 'group' ? -1 : 1); });
+    return { items: items, groups: groups, currentGroup: current, totalHeight: totalHeight, maxScroll: maxScroll };
+  }
+
+  function filterInputValue(current, input, composing) {
+    return composing ? current : String(input == null ? '' : input).trim();
   }
 
   /* Key handling while the cell editor is open. Between compositionstart and
@@ -159,14 +353,28 @@
   return {
     ROW_H: ROW_H,
     HEADER_H: HEADER_H,
+    GROUP_H: GROUP_H,
+    MIN_COL_WIDTH: MIN_COL_WIDTH,
     clamp: clamp,
     visibleRange: visibleRange,
+    columnMetrics: columnMetrics,
+    resizeColumn: resizeColumn,
     createSelection: createSelection,
+    createDataSelection: createDataSelection,
     normalizeSelection: normalizeSelection,
     isSelected: isSelected,
+    isDataRowSelected: isDataRowSelected,
     moveFocus: moveFocus,
+    moveDataSelection: moveDataSelection,
     tabNext: tabNext,
+    tabNextData: tabNextData,
+    visibleFocus: visibleFocus,
     toTSV: toTSV,
+    filterRows: filterRows,
+    groupRows: groupRows,
+    layoutGroups: layoutGroups,
+    visibleGroupedRows: visibleGroupedRows,
+    filterInputValue: filterInputValue,
     editorKeyAction: editorKeyAction,
     generateData: generateData,
   };

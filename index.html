@@ -9,11 +9,24 @@
 <body>
   <div class="toolbar">
     <span class="toolbar-title">成交明细</span>
+    <label class="toolbar-field">
+      分组
+      <select id="groupColumn" aria-label="按列分组"></select>
+    </label>
+    <button id="clearGroup" type="button">取消分组</button>
+    <label class="toolbar-field">
+      筛选列
+      <select id="filterColumn" aria-label="筛选列"></select>
+    </label>
+    <input id="filterInput" class="filter-input" type="search" placeholder="输入关键字"
+      aria-label="按列关键字筛选">
+    <button id="clearFilter" type="button">清空</button>
     <span id="status" class="toolbar-status"></span>
   </div>
   <div id="grid" class="grid" tabindex="0" aria-label="成交数据表格">
     <div id="canvas" class="canvas">
       <div id="header" class="row header-row"></div>
+      <div id="groupBar" class="group-bar" hidden></div>
       <!-- visible rows are rendered here by app.js -->
     </div>
     <div id="empty" class="empty" hidden>暂无成交数据</div>

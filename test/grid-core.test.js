@@ -162,3 +162,136 @@ test('data: zero and one row datasets are valid', () => {
   assert.deepEqual(Core.generateData(0), []);
   assert.equal(Core.generateData(1).length, 1);
 });
+
+/* ---------- filtering ---------- */
+
+test('filter: keywords use original data row ids and can reduce to zero rows', () => {
+  const data = [
+    ['SO-1', '上海'],
+    ['SO-2', '北京'],
+    ['SO-3', '上海'],
+  ];
+  assert.deepEqual(Core.filterRows(data, [{ column: 1, keyword: '上海' }]), [0, 2]);
+  assert.deepEqual(Core.filterRows(data, [{ column: 1, keyword: '不存在' }]), []);
+  assert.deepEqual(Core.filterRows(data, [{ column: 1, keyword: '  ' }]), [0, 1, 2]);
+});
+
+test('filter: case-insensitive keyword matching is trim-safe', () => {
+  const data = [['Abc'], ['abc'], ['xyz']];
+  assert.deepEqual(Core.filterRows(data, [{ column: 0, keyword: ' aB ' }]), [0, 1]);
+});
+
+test('filter input: IME composition does not apply every provisional key', () => {
+  assert.equal(Core.filterInputValue('old', 'pinyin', true), 'old');
+  assert.equal(Core.filterInputValue('old', '北京', false), '北京');
+});
+
+/* ---------- grouping ---------- */
+
+test('group: groups retain filtered data ids in original row order', () => {
+  const data = [['a'], ['b'], ['a'], ['b']];
+  const groups = Core.groupRows(data, [0, 1, 2, 3], 0);
+  assert.deepEqual(groups, [
+    { key: 'a', rowIds: [0, 2], count: 2 },
+    { key: 'b', rowIds: [1, 3], count: 2 },
+  ]);
+});
+
+test('group: zero filtered rows and one group are valid', () => {
+  assert.deepEqual(Core.groupRows([], [], 0), []);
+  assert.equal(Core.groupRows([['x']], [0], -1), null);
+  assert.deepEqual(Core.groupRows([['x']], [0], 0), [
+    { key: 'x', rowIds: [0], count: 1 },
+  ]);
+});
+
+test('group layout: collapsed group hides rows but keeps one header', () => {
+  const groups = [
+    { key: 'a', rowIds: [0, 1], count: 2 },
+    { key: 'b', rowIds: [2], count: 1 },
+  ];
+  const laid = Core.layoutGroups(groups, new Set(['a']));
+  assert.equal(laid[0].height, ROW_H);
+  assert.equal(laid[0].collapsed, true);
+  assert.equal(laid[1].top, ROW_H);
+  assert.equal(laid[1].height, ROW_H + ROW_H);
+});
+
+test('group layout: later groups start after the previous header and rows', () => {
+  const groups = [
+    { key: 'a', rowIds: [0, 1], count: 2 },
+    { key: 'b', rowIds: [2], count: 1 },
+  ];
+  const laid = Core.layoutGroups(groups);
+  assert.equal(laid[0].top, 0);
+  assert.equal(laid[0].rowTop(1), ROW_H + ROW_H);
+  assert.equal(laid[1].top, ROW_H + 2 * ROW_H);
+  assert.equal(laid[1].rowTop(0), laid[1].top + ROW_H);
+});
+
+test('grouped virtualization: swaps sticky group at a boundary and keeps DOM sparse', () => {
+  const groups = [
+    { key: 'a', rowIds: Array.from({ length: 100 }, (_, i) => i), count: 100 },
+    { key: 'b', rowIds: Array.from({ length: 100 }, (_, i) => i + 100), count: 100 },
+  ];
+  const before = Core.visibleGroupedRows({
+    groups, scrollTop: 99 * ROW_H, viewportHeight: 10 * ROW_H, overscan: 0,
+  });
+  assert.equal(before.currentGroup.key, 'a');
+  assert.ok(before.items.length < 25);
+  const atBoundary = Core.visibleGroupedRows({
+    groups, scrollTop: 101 * ROW_H, viewportHeight: 10 * ROW_H, overscan: 0,
+  });
+  assert.equal(atBoundary.currentGroup.key, 'b');
+  assert.equal(atBoundary.totalHeight, 2 * (ROW_H + 100 * ROW_H));
+});
+
+/* ---------- data-coordinate selection ---------- */
+
+test('selection: filtered movement uses data ids, not screen row numbers', () => {
+  const ids = [2, 7, 9];
+  let sel = Core.createDataSelection(2, 0);
+  sel = Core.moveDataSelection(sel, 1, 0, ids, 2, false);
+  assert.deepEqual(sel.focus, { r: 7, c: 0 });
+  sel = Core.moveDataSelection(sel, 0, 1, ids, 2, true);
+  sel = Core.moveDataSelection(sel, 1, 1, ids, 2, true);
+  assert.deepEqual(sel.focus, { r: 9, c: 1 });
+  assert.deepEqual(sel.rowIds, [7, 9]);
+  assert.ok(Core.isSelected(sel, 7, 0));
+  assert.ok(!Core.isSelected(sel, 8, 0));
+});
+
+test('selection: TSV follows the filtered/group view row order', () => {
+  const data = [
+    ['a0'], ['a1'], ['a2'], ['a3'],
+  ];
+  const sel = {
+    anchor: { r: 3, c: 0 },
+    focus: { r: 1, c: 0 },
+    rowIds: [3, 1],
+  };
+  assert.equal(Core.toTSV(data, sel), 'a3\na1');
+});
+
+test('selection: collapsed groups preserve the original editing coordinate', () => {
+  const sel = Core.createDataSelection(123, 4);
+  const collapsed = Core.moveDataSelection(sel, 0, 0, [], 10, false);
+  assert.equal(collapsed, sel);
+  assert.deepEqual(sel.focus, { r: 123, c: 4 });
+});
+
+/* ---------- column widths ---------- */
+
+test('column resize: width changes stay independent and respect minimum', () => {
+  const widths = [100, 80];
+  const wider = Core.resizeColumn(widths, 0, 25, 40);
+  assert.deepEqual(wider, [125, 80]);
+  assert.deepEqual(widths, [100, 80]);
+  assert.deepEqual(Core.resizeColumn(widths, 1, -1000, 40), [100, 40]);
+});
+
+test('column metrics: frozen and scrolling panes share the same coordinates', () => {
+  const metrics = Core.columnMetrics([120, 80, 200]);
+  assert.deepEqual(metrics.lefts, [0, 120, 200, 400]);
+  assert.equal(metrics.totalWidth, 400);
+});
