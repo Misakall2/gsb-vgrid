@@ -20,7 +20,9 @@
     { title: '备注', width: 260 },
   ];
   const COL_COUNT = COLUMNS.length;
-  const TOTAL_WIDTH = COLUMNS.reduce(function (s, c) { return s + c.width; }, 0);
+  let columns = COLUMNS.map(function (col) { return { title: col.title, width: col.width }; });
+  let layout = Core.columnLayout(columns);
+  const TOTAL_WIDTH = layout.totalWidth;
 
   // ?rows=0 / ?rows=1 give reproducible empty / single-row states.
   const params = new URLSearchParams(location.search);
@@ -28,16 +30,31 @@
   const ROW_COUNT = isNaN(parsed) || parsed < 0 ? 0 : parsed;
 
   const data = Core.generateData(ROW_COUNT);
-  const bounds = { rowCount: ROW_COUNT, colCount: COL_COUNT };
 
   const grid = document.getElementById('grid');
   const canvas = document.getElementById('canvas');
   const headerEl = document.getElementById('header');
   const emptyEl = document.getElementById('empty');
   const statusEl = document.getElementById('status');
+  const groupColumnEl = document.getElementById('group-column');
+  const filterColumnEl = document.getElementById('filter-column');
+  const filterKeywordEl = document.getElementById('filter-keyword');
+  const clearFilterEl = document.getElementById('clear-filter');
+  const groupBandEl = document.getElementById('group-band');
+  const groupToggleEl = document.getElementById('group-toggle');
+  const groupTitleEl = document.getElementById('group-title');
+  const groupCountEl = document.getElementById('group-count');
+  const groupPickerEl = document.getElementById('group-picker');
 
   let sel = Core.createSelection(0, 0);
   const rowEls = new Map(); // rowIndex -> element, only for rendered rows
+  let filteredRowIds = data.map(function (_, r) { return r; });
+  let groupColumn = -1;
+  let groups = [];
+  let groupIndexByRowId = new Map();
+  let visibleRowIds = filteredRowIds.slice();
+  const collapsedGroups = new Set();
+  let filterActive = false;
 
   const editor = {
     open: false,
@@ -46,21 +63,29 @@
     input: null,
     composing: false,
     commitOnBlur: false,
+    suspended: false,
   };
 
   function colLeft(c) {
-    let x = 0;
-    for (let i = 0; i < c; i++) x += COLUMNS[i].width;
-    return x;
+    return layout.lefts[c];
   }
 
   function buildHeader() {
-    headerEl.style.width = TOTAL_WIDTH + 'px';
-    COLUMNS.forEach(function (col, i) {
+    headerEl.style.width = layout.totalWidth + 'px';
+    headerEl.innerHTML = '';
+    columns.forEach(function (col, i) {
       const cell = document.createElement('div');
       cell.className = 'cell' + (i === 0 ? ' sticky' : '');
       cell.style.width = col.width + 'px';
       cell.textContent = col.title;
+      cell.dataset.c = i;
+      if (i < COL_COUNT - 1) {
+        const handle = document.createElement('span');
+        handle.className = 'col-resizer';
+        handle.dataset.col = i;
+        handle.title = '拖动调整列宽';
+        cell.appendChild(handle);
+      }
       headerEl.appendChild(cell);
     });
   }
@@ -68,12 +93,14 @@
   function buildRow(r) {
     const rowEl = document.createElement('div');
     rowEl.className = 'row';
-    rowEl.style.top = (HEADER_H + r * ROW_H) + 'px';
-    rowEl.style.width = TOTAL_WIDTH + 'px';
+    const viewIndex = visibleRowIds.indexOf(r);
+    rowEl.style.top = (groupedTopOffset() + viewIndex * ROW_H) + 'px';
+    rowEl.style.width = layout.totalWidth + 'px';
+    rowEl.dataset.dataRow = r;
     for (let c = 0; c < COL_COUNT; c++) {
       const cell = document.createElement('div');
       cell.className = 'cell' + (c === 0 ? ' sticky' : '');
-      cell.style.width = COLUMNS[c].width + 'px';
+      cell.style.width = columns[c].width + 'px';
       cell.textContent = data[r][c];
       cell.dataset.r = r;
       cell.dataset.c = c;
@@ -84,37 +111,103 @@
     return rowEl;
   }
 
+  function groupedTopOffset() {
+    return groups.length ? Core.GROUP_H : 0;
+  }
+
+  function updateGroupHeader() {
+    if (!groups.length || ROW_COUNT === 0) {
+      groupBandEl.hidden = true;
+      return;
+    }
+    let idx = Core.currentGroupIndex({
+      rowIds: visibleRowIds,
+      groupIndexByRowId: groupIndexByRowId,
+      scrollTop: grid.scrollTop,
+      topOffset: Core.GROUP_H,
+    });
+    if (idx < 0) idx = Number(groupPickerEl.value) || 0;
+    const group = groups[idx];
+    groupBandEl.hidden = false;
+    groupBandEl.style.width = layout.totalWidth + 'px';
+    groupToggleEl.textContent = collapsedGroups.has(group.key) ? '+' : '−';
+    groupToggleEl.dataset.groupIndex = idx;
+    groupTitleEl.textContent = columns[groupColumn].title + ': ' + group.key;
+    groupCountEl.textContent = group.count + ' 条';
+    groupPickerEl.innerHTML = '';
+    groups.forEach(function (g, i) {
+      const option = document.createElement('option');
+      option.value = i;
+      option.textContent = (collapsedGroups.has(g.key) ? '+ ' : '- ') + g.key + ' (' + g.count + ')';
+      groupPickerEl.appendChild(option);
+    });
+    groupPickerEl.value = String(idx);
+  }
+
   function render() {
     const range = Core.visibleRange({
       scrollTop: grid.scrollTop,
       viewportHeight: grid.clientHeight,
-      rowCount: ROW_COUNT,
+      rowCount: visibleRowIds.length,
+      topOffset: groupedTopOffset(),
     });
     // Recycle: drop every rendered row, rebuild only the visible window.
     // The selection is pure data, so highlights reappear on rebuild.
+    if (editor.open && !editor.suspended) suspendEditor();
     rowEls.forEach(function (el) { el.remove(); });
     rowEls.clear();
-    for (let r = range.start; r < range.end; r++) {
-      const rowEl = buildRow(r);
+    for (let i = range.start; i < range.end; i++) {
+      const dataRow = visibleRowIds[i];
+      const rowEl = buildRow(dataRow);
       canvas.appendChild(rowEl);
-      rowEls.set(r, rowEl);
+      rowEls.set(dataRow, rowEl);
     }
     if (editor.open) {
-      if (editor.r >= range.start && editor.r < range.end) {
-        mountEditor(rowEls.get(editor.r));
+      const rowEl = rowEls.get(editor.r);
+      if (rowEl) {
+        restoreEditor(rowEl);
       } else {
-        commitEditor(); // edited row scrolled away: settle the value first
+        editor.suspended = true;
       }
     }
+    canvas.style.height = (Core.HEADER_H + groupedTopOffset() + visibleRowIds.length * ROW_H) + 'px';
+    updateGroupHeader();
+    emptyEl.hidden = visibleRowIds.length !== 0;
+    emptyEl.textContent = ROW_COUNT === 0 ? '暂无成交数据' : '没有匹配的数据';
     updateStatus();
+  }
+
+  function clampScrollToContent() {
+    const maxScrollTop = Math.max(0, canvas.offsetHeight - grid.clientHeight);
+    if (grid.scrollTop > maxScrollTop) grid.scrollTop = maxScrollTop;
+    const maxScrollLeft = Math.max(0, layout.totalWidth - grid.clientWidth);
+    if (grid.scrollLeft > maxScrollLeft) grid.scrollLeft = maxScrollLeft;
+  }
+
+  function applyView() {
+    const keyword = filterKeywordEl.value.trim();
+    const filters = keyword ? [{ columnIndex: Number(filterColumnEl.value), keyword: keyword }] : [];
+    filteredRowIds = Core.filterRows(data, filters);
+    filterActive = Boolean(keyword);
+    groupColumn = Number(groupColumnEl.value);
+    const grouped = Core.groupRows(filteredRowIds, data, groupColumn, collapsedGroups);
+    groups = grouped.groups;
+    groupIndexByRowId = grouped.groupIndexByRowId;
+    visibleRowIds = grouped.visibleRowIds;
+    clampScrollToContent();
+    if (editor.open && visibleRowIds.indexOf(editor.r) !== -1) ensureVisible(editor.r, editor.c);
+    render();
   }
 
   function updateStatus() {
     const n = Core.normalizeSelection(sel);
     const rows = n.r2 - n.r1 + 1;
     const cols = n.c2 - n.c1 + 1;
-    statusEl.textContent = ROW_COUNT.toLocaleString() + ' 行' +
-      (ROW_COUNT ? ' · 选区 ' + rows + ' 行 × ' + cols + ' 列' : '');
+    const parts = [visibleRowIds.length.toLocaleString() + ' / ' + ROW_COUNT.toLocaleString() + ' 行'];
+    if (groups.length) parts.push(groups.length + ' 组');
+    if (filterActive) parts.push('已筛选');
+    if (visibleRowIds.length) parts.push('选区 ' + rows + ' 行 × ' + cols + ' 列');
+    statusEl.textContent = parts.join(' · ');
   }
 
   /* ---------- scrolling ---------- */
@@ -130,17 +223,19 @@
   });
 
   function ensureVisible(r, c) {
-    const top = HEADER_H + r * ROW_H;
+    const viewIndex = visibleRowIds.indexOf(r);
+    if (viewIndex === -1) return;
+    const top = HEADER_H + groupedTopOffset() + viewIndex * ROW_H;
     const bottom = top + ROW_H;
-    const viewTop = grid.scrollTop + HEADER_H; // header stays pinned
+    const viewTop = grid.scrollTop + HEADER_H + groupedTopOffset();
     const viewBottom = grid.scrollTop + grid.clientHeight;
-    if (top < viewTop) grid.scrollTop = top - HEADER_H;
+    if (top < viewTop) grid.scrollTop = top - HEADER_H - groupedTopOffset();
     else if (bottom > viewBottom) grid.scrollTop = bottom - grid.clientHeight;
 
     if (c > 0) { // column 0 is frozen, always visible
       const left = colLeft(c);
-      const right = left + COLUMNS[c].width;
-      const frozenW = COLUMNS[0].width;
+      const right = left + columns[c].width;
+      const frozenW = columns[0].width;
       const viewL = grid.scrollLeft + frozenW;
       const viewR = grid.scrollLeft + grid.clientWidth;
       if (left < viewL) grid.scrollLeft = left - frozenW;
@@ -157,7 +252,7 @@
   }
 
   function move(dr, dc, extend) {
-    sel = Core.moveFocus(sel, dr, dc, bounds, extend);
+    sel = Core.moveVisibleFocus(sel, dr, dc, visibleRowIds, COL_COUNT, extend);
     afterMove();
   }
 
@@ -169,7 +264,7 @@
       case 'ArrowLeft': move(0, -1, e.shiftKey); e.preventDefault(); break;
       case 'ArrowRight': move(0, 1, e.shiftKey); e.preventDefault(); break;
       case 'Tab':
-        sel = Core.tabNext(sel, bounds, e.shiftKey);
+        sel = Core.tabNextVisible(sel, visibleRowIds, COL_COUNT, e.shiftKey);
         afterMove();
         e.preventDefault();
         break;
@@ -211,7 +306,7 @@
   document.addEventListener('copy', function (e) {
     if (editor.open) return; // let the input's own copy through
     if (document.activeElement !== grid) return;
-    e.clipboardData.setData('text/plain', Core.toTSV(data, sel));
+    e.clipboardData.setData('text/plain', Core.toTSV(data, sel, visibleRowIds));
     e.preventDefault();
   });
 
@@ -224,6 +319,18 @@
     cell.appendChild(editor.input);
   }
 
+  function suspendEditor() {
+    if (!editor.open || editor.suspended || !editor.input) return;
+    editor.suspended = true;
+    if (editor.input.parentElement) editor.input.parentElement.classList.remove('editing');
+    document.body.appendChild(editor.input);
+  }
+
+  function restoreEditor(rowEl) {
+    mountEditor(rowEl);
+    editor.suspended = false;
+  }
+
   function openEditor() {
     if (ROW_COUNT === 0 || editor.open) return;
     const r = sel.focus.r, c = sel.focus.c;
@@ -234,12 +341,13 @@
     editor.c = c;
     editor.composing = false;
     editor.commitOnBlur = false;
+    editor.suspended = false;
     const input = document.createElement('input');
     input.className = 'editor';
     input.value = data[r][c];
     editor.input = input;
     bindEditorEvents(input);
-    mountEditor(rowEls.get(r));
+    restoreEditor(rowEls.get(r));
     input.focus();
     input.select();
   }
@@ -250,6 +358,7 @@
     editor.open = false;
     editor.composing = false;
     editor.commitOnBlur = false;
+    editor.suspended = false;
     editor.input.remove();
     editor.input = null;
   }
@@ -259,6 +368,7 @@
     editor.open = false;
     editor.composing = false;
     editor.commitOnBlur = false;
+    editor.suspended = false;
     editor.input.remove();
     editor.input = null;
   }
@@ -293,11 +403,11 @@
         return;
       }
       commitEditor();
-      if (action === 'commit-tab') sel = Core.tabNext(sel, bounds, e.shiftKey);
-      else if (action === 'commit-up') sel = Core.moveFocus(sel, -1, 0, bounds, false);
-      else if (action === 'commit-down') sel = Core.moveFocus(sel, 1, 0, bounds, false);
-      else if (action === 'commit-left') sel = Core.moveFocus(sel, 0, -1, bounds, false);
-      else if (action === 'commit-right') sel = Core.moveFocus(sel, 0, 1, bounds, false);
+      if (action === 'commit-tab') sel = Core.tabNextVisible(sel, visibleRowIds, COL_COUNT, e.shiftKey);
+      else if (action === 'commit-up') sel = Core.moveVisibleFocus(sel, -1, 0, visibleRowIds, COL_COUNT, false);
+      else if (action === 'commit-down') sel = Core.moveVisibleFocus(sel, 1, 0, visibleRowIds, COL_COUNT, false);
+      else if (action === 'commit-left') sel = Core.moveVisibleFocus(sel, 0, -1, visibleRowIds, COL_COUNT, false);
+      else if (action === 'commit-right') sel = Core.moveVisibleFocus(sel, 0, 1, visibleRowIds, COL_COUNT, false);
       afterMove();
     });
     input.addEventListener('blur', function () {
@@ -314,6 +424,131 @@
 
   /* ---------- init ---------- */
 
+  function buildToolbar() {
+    columns.forEach(function (col, i) {
+      const groupOption = document.createElement('option');
+      groupOption.value = i;
+      groupOption.textContent = col.title;
+      groupColumnEl.appendChild(groupOption);
+
+      const filterOption = document.createElement('option');
+      filterOption.value = i;
+      filterOption.textContent = col.title;
+      filterColumnEl.appendChild(filterOption);
+    });
+    filterColumnEl.value = '2';
+  }
+
+  function finishEditingBeforeViewChange() {
+    if (editor.open) {
+      commitEditor();
+      grid.focus();
+    }
+  }
+
+  groupColumnEl.addEventListener('change', function () {
+    applyView();
+  });
+
+  filterColumnEl.addEventListener('change', function () {
+    if (!filterKeywordEl.value) return;
+    finishEditingBeforeViewChange();
+    applyView();
+  });
+
+  filterKeywordEl.addEventListener('compositionstart', function () {
+    filterKeywordEl.dataset.composing = '1';
+  });
+  filterKeywordEl.addEventListener('compositionend', function () {
+    filterKeywordEl.dataset.composing = '0';
+    finishEditingBeforeViewChange();
+    applyView();
+  });
+  filterKeywordEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && filterKeywordEl.dataset.composing !== '1') {
+      finishEditingBeforeViewChange();
+      applyView();
+      e.preventDefault();
+    }
+  });
+  filterKeywordEl.addEventListener('change', function () {
+    if (filterKeywordEl.dataset.composing === '1') return;
+    finishEditingBeforeViewChange();
+    applyView();
+  });
+
+  clearFilterEl.addEventListener('click', function () {
+    filterKeywordEl.value = '';
+    finishEditingBeforeViewChange();
+    applyView();
+    filterKeywordEl.focus();
+  });
+
+  groupToggleEl.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+  });
+  function toggleGroup(idx) {
+    const group = groups[idx];
+    if (!group) return;
+    if (collapsedGroups.has(group.key)) collapsedGroups.delete(group.key);
+    else collapsedGroups.add(group.key);
+    applyView();
+  }
+  groupToggleEl.addEventListener('click', function () {
+    toggleGroup(Number(groupToggleEl.dataset.groupIndex));
+    grid.focus();
+  });
+  groupPickerEl.addEventListener('change', function () {
+    toggleGroup(Number(groupPickerEl.value));
+    grid.focus();
+  });
+
+  function applyColumnWidths() {
+    layout = Core.columnLayout(columns);
+    canvas.style.width = layout.totalWidth + 'px';
+    headerEl.style.width = layout.totalWidth + 'px';
+    groupBandEl.style.width = layout.totalWidth + 'px';
+    Array.prototype.forEach.call(headerEl.children, function (cell) {
+      if (cell.classList && cell.classList.contains('cell')) {
+        const c = Number(cell.dataset.c);
+        if (!Number.isNaN(c)) cell.style.width = columns[c].width + 'px';
+      }
+    });
+    Array.from(rowEls.values()).forEach(function (row) {
+      row.style.width = layout.totalWidth + 'px';
+      for (let c = 0; c < COL_COUNT; c++) {
+        if (row.children[c]) row.children[c].style.width = columns[c].width + 'px';
+      }
+    });
+  }
+
+  headerEl.addEventListener('pointerdown', function (e) {
+    const handle = e.target.closest('.col-resizer');
+    if (!handle) return;
+    const colIndex = Number(handle.dataset.col);
+    const startX = e.clientX;
+    const startWidth = columns[colIndex].width;
+    const activeCell = document.activeElement;
+    handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+
+    function onMove(ev) {
+      columns = Core.resizeColumn(columns, colIndex, startWidth + ev.clientX - startX);
+      applyColumnWidths();
+      updateGroupHeader();
+    }
+    function onUp() {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      handle.releasePointerCapture(e.pointerId);
+      clampScrollToContent();
+      if (activeCell && typeof activeCell.focus === 'function') activeCell.focus();
+    }
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+  });
+
+  buildToolbar();
   buildHeader();
   canvas.style.width = TOTAL_WIDTH + 'px';
   canvas.style.height = (HEADER_H + ROW_COUNT * ROW_H) + 'px';

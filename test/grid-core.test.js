@@ -52,6 +52,77 @@ test('visibleRange: overscan extends but never leaves data bounds', () => {
   assert.equal(bottom.end, 10000);
 });
 
+test('visibleRange: grouped rows can reserve a frozen group header', () => {
+  const r = Core.visibleRange({
+    scrollTop: 7 * ROW_H,
+    viewportHeight: 10 * ROW_H,
+    rowCount: 100,
+    topOffset: Core.GROUP_H,
+    overscan: 0,
+  });
+  assert.equal(r.start, 7);
+  assert.equal(r.offset, Core.GROUP_H + 7 * ROW_H);
+});
+
+/* ---------- filtering and grouping ---------- */
+
+test('filterRows: returns data-layer row ids and supports zero results', () => {
+  const rows = [
+    ['SO-1', '上海'],
+    ['SO-2', '北京'],
+    ['SO-3', '上海'],
+  ];
+  assert.deepEqual(Core.filterRows(rows, [{ columnIndex: 1, keyword: '上海' }]), [0, 2]);
+  assert.deepEqual(Core.filterRows(rows, [{ columnIndex: 1, keyword: '不存在' }]), []);
+  assert.deepEqual(Core.filterRows(rows, [{ columnIndex: 1, keyword: '' }]), [0, 1, 2]);
+});
+
+test('filterRows: keyword match is case insensitive', () => {
+  const rows = [['ABC'], ['abc'], ['xyz']];
+  assert.deepEqual(Core.filterRows(rows, [{ columnIndex: 0, keyword: 'aB' }]), [0, 1]);
+});
+
+test('groupRows: preserves first-seen order, counts rows, and maps every row id', () => {
+  const data = [['a', 1], ['b', 2], ['a', 3], ['b', 4], ['c', 5]];
+  const result = Core.groupRows([0, 1, 2, 3, 4], data, 0);
+  assert.deepEqual(result.groups.map((g) => g.key), ['a', 'b', 'c']);
+  assert.deepEqual(result.groups.map((g) => g.count), [2, 2, 1]);
+  assert.deepEqual(result.visibleRowIds, [0, 2, 1, 3, 4]);
+  assert.equal(result.groupIndexByRowId.get(0), 0);
+  assert.equal(result.groupIndexByRowId.get(1), 1);
+  assert.equal(result.groupIndexByRowId.get(4), 2);
+});
+
+test('groupRows: collapsed group hides only its filtered rows', () => {
+  const data = [['a', 1], ['b', 2], ['a', 3], ['c', 4]];
+  const collapsed = new Set(['a']);
+  const result = Core.groupRows([0, 1, 2, 3], data, 0, collapsed);
+  assert.deepEqual(result.visibleRowIds, [1, 3]);
+  assert.equal(result.groupIndexByRowId.get(2), 0);
+});
+
+test('groupRows: a single remaining group still maps every filtered row', () => {
+  const data = [['上海', 'x'], ['北京', 'y'], ['上海', 'z']];
+  const ids = Core.filterRows(data, [{ columnIndex: 0, keyword: '上海' }]);
+  const result = Core.groupRows(ids, data, 0);
+  assert.equal(result.groups.length, 1);
+  assert.deepEqual(result.visibleRowIds, [0, 2]);
+});
+
+test('currentGroupIndex: switches the frozen header when crossing group boundaries', () => {
+  const data = [['a'], ['a'], ['b'], ['b'], ['b']];
+  const grouped = Core.groupRows([0, 1, 2, 3, 4], data, 0);
+  const opts = {
+    rowIds: grouped.visibleRowIds,
+    groupIndexByRowId: grouped.groupIndexByRowId,
+    topOffset: Core.GROUP_H,
+  };
+  assert.equal(Core.currentGroupIndex(Object.assign({ scrollTop: Core.GROUP_H }, opts)), 0);
+  assert.equal(Core.currentGroupIndex(Object.assign({ scrollTop: Core.GROUP_H + ROW_H }, opts)), 0);
+  assert.equal(Core.currentGroupIndex(Object.assign({ scrollTop: Core.GROUP_H + 2 * ROW_H }, opts)), 1);
+  assert.equal(Core.currentGroupIndex(Object.assign({ scrollTop: 1e9 }, opts)), 1);
+});
+
 /* ---------- selection model ---------- */
 
 test('selection: move clamps at grid edges', () => {
@@ -98,6 +169,32 @@ test('selection: moves are no-ops on an empty table', () => {
   assert.equal(Core.tabNext(sel, bounds, false), sel);
 });
 
+test('selection: visible navigation uses data row ids after filtering', () => {
+  let sel = Core.createSelection(0, 0);
+  sel = Core.moveVisibleFocus(sel, 1, 0, [0, 2, 9], 3, false);
+  assert.deepEqual(sel.focus, { r: 2, c: 0 });
+  sel = Core.moveVisibleFocus(sel, 1, 0, [0, 2, 9], 3, false);
+  assert.deepEqual(sel.focus, { r: 9, c: 0 });
+});
+
+test('selection: nearest filtered row keeps movement anchored to the data layer', () => {
+  const sel = Core.createSelection(5, 1);
+  const moved = Core.moveVisibleFocus(sel, 1, 0, [0, 2, 4], 3, false);
+  assert.deepEqual(moved.focus, { r: 4, c: 1 });
+});
+
+test('selection: no visible rows is a no-op after filtering to zero', () => {
+  const sel = Core.createSelection(3, 2);
+  assert.equal(Core.moveVisibleFocus(sel, 1, 0, [], 3, false), sel);
+  assert.equal(Core.tabNextVisible(sel, [], 3, false), sel);
+});
+
+test('tab: visible mode traverses filtered data rows and wraps columns', () => {
+  let sel = Core.createSelection(2, 2);
+  sel = Core.tabNextVisible(sel, [2, 7], 3, false);
+  assert.deepEqual(sel.focus, { r: 7, c: 0 });
+});
+
 test('tab: walks right, wraps to next row, clamps at the last cell', () => {
   const bounds = { rowCount: 2, colCount: 3 };
   let sel = Core.createSelection(0, 2);
@@ -129,6 +226,27 @@ test('toTSV: long cell values are copied in full', () => {
   const data = [[long, 'x']];
   const sel = Core.createSelection(0, 0);
   assert.equal(Core.toTSV(data, sel), long);
+});
+
+test('toTSV: filtered view only copies visible selected data rows', () => {
+  const data = [['a0'], ['hidden'], ['a2'], ['hidden2'], ['a4']];
+  const sel = { anchor: { r: 0, c: 0 }, focus: { r: 4, c: 0 } };
+  assert.equal(Core.toTSV(data, sel, [0, 2, 4]), 'a0\na2\na4');
+});
+
+/* ---------- column widths ---------- */
+
+test('columns: resize clamps to the minimum and does not mutate input', () => {
+  const cols = [{ title: 'A', width: 100 }, { title: 'B', width: 80 }];
+  const resized = Core.resizeColumn(cols, 1, 20, 40);
+  assert.equal(resized[1].width, 40);
+  assert.equal(cols[1].width, 80);
+  assert.deepEqual(resized[0], { title: 'A', width: 100 });
+});
+
+test('columns: layout exposes left offsets and total width for frozen alignment', () => {
+  const cols = [{ title: 'A', width: 100 }, { title: 'B', width: 75 }, { title: 'C', width: 50 }];
+  assert.deepEqual(Core.columnLayout(cols), { lefts: [0, 100, 175], totalWidth: 225 });
 });
 
 /* ---------- editor key state machine ---------- */

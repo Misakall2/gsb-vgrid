@@ -9,14 +9,32 @@
 <body>
   <div class="toolbar">
     <span class="toolbar-title">成交明细</span>
+    <label class="toolbar-control">
+      分组列
+      <select id="group-column" aria-label="分组列">
+        <option value="-1">不分组</option>
+      </select>
+    </label>
+    <label class="toolbar-control">
+      筛选列
+      <select id="filter-column" aria-label="筛选列"></select>
+    </label>
+    <input id="filter-keyword" class="filter-input" type="search" placeholder="关键字" aria-label="筛选关键字">
+    <button id="clear-filter" type="button">清除筛选</button>
     <span id="status" class="toolbar-status"></span>
   </div>
   <div id="grid" class="grid" tabindex="0" aria-label="成交数据表格">
     <div id="canvas" class="canvas">
       <div id="header" class="row header-row"></div>
+      <div id="group-band" class="group-band" hidden>
+        <button id="group-toggle" class="group-toggle" type="button" aria-label="折叠或展开分组"></button>
+        <span id="group-title" class="group-title"></span>
+        <span id="group-count" class="group-count"></span>
+        <select id="group-picker" class="group-picker" aria-label="选择并折叠或展开分组"></select>
+      </div>
       <!-- visible rows are rendered here by app.js -->
     </div>
-    <div id="empty" class="empty" hidden>暂无成交数据</div>
+    <div id="empty" class="empty" hidden></div>
   </div>
   <script src="grid-core.js"></script>
   <script src="app.js"></script>
