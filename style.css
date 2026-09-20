@@ -1,0 +1,150 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: #1f2329;
+  background: #f0f1f3;
+}
+
+.toolbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #dee0e3;
+}
+
+.toolbar-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.toolbar-status {
+  color: #646a73;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The scrollport. Both scrollbars live here. */
+.grid {
+  position: relative;
+  height: calc(100vh - 44px);
+  overflow: auto;
+  outline: none;
+  background: #ffffff;
+}
+
+/* The full-size canvas: its height/width come from total rows/columns,
+   which is what makes the scrollbars reflect all 10,000 rows. */
+.canvas {
+  position: relative;
+}
+
+.row {
+  position: absolute;
+  left: 0;
+  display: flex;
+  height: 32px;
+}
+
+.cell {
+  flex: none;
+  position: relative;
+  height: 32px;
+  line-height: 31px; /* 32 - 1px bottom border, keeps every baseline identical */
+  padding: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: #ffffff;
+  border-right: 1px solid #eff0f1;
+  border-bottom: 1px solid #eff0f1;
+  cursor: cell;
+  user-select: none;
+}
+
+/* Frozen first column: sticks to the left edge of the scrollport while the
+   rest of the row scrolls underneath. Opaque background is required. */
+.cell.sticky {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background: #ffffff;
+  border-right: 1px solid #dee0e3;
+  font-weight: 500;
+}
+
+/* Frozen header row. */
+.header-row {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  height: 36px;
+}
+
+.header-row .cell {
+  height: 36px;
+  line-height: 35px;
+  background: #f5f6f7;
+  border-bottom: 1px solid #dee0e3;
+  font-weight: 600;
+  color: #434956;
+  cursor: default;
+}
+
+/* Corner cell is frozen in both directions. */
+.header-row .cell.sticky {
+  z-index: 40;
+  background: #f5f6f7;
+}
+
+.cell.selected {
+  background: #e8f0fe;
+}
+
+.cell.sticky.selected {
+  background: #dbe7fd;
+}
+
+.cell.active {
+  box-shadow: inset 0 0 0 2px #2f6fed;
+}
+
+.cell.editing {
+  padding: 0;
+  overflow: visible;
+}
+
+input.editor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0 7px;
+  border: 2px solid #2f6fed;
+  border-radius: 0;
+  font: inherit;
+  line-height: 31px;
+  background: #ffffff;
+  outline: none;
+  z-index: 5;
+}
+
+.empty {
+  position: sticky;
+  top: 96px;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  color: #8f959e;
+  font-size: 14px;
+  pointer-events: none;
+}

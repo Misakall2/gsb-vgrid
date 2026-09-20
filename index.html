@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>成交数据 - 虚拟表格</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="toolbar">
+    <span class="toolbar-title">成交明细</span>
+    <span id="status" class="toolbar-status"></span>
+  </div>
+  <div id="grid" class="grid" tabindex="0" aria-label="成交数据表格">
+    <div id="canvas" class="canvas">
+      <div id="header" class="row header-row"></div>
+      <!-- visible rows are rendered here by app.js -->
+    </div>
+    <div id="empty" class="empty" hidden>暂无成交数据</div>
+  </div>
+  <script src="grid-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
