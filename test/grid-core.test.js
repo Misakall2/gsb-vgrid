@@ -424,3 +424,100 @@ test('regression: an empty selection is safe before the first data row exists', 
   assert.deepEqual(sel.rowIds, []);
   assert.equal(Core.toTSV([], sel), '');
 });
+
+/* ---------- refactor boundaries: viewport / composition / selection / freeze ---------- */
+
+test('refactor: composition scroll and DOM recycling retain the same data coordinate', () => {
+  let composition = Core.createCompositionState(42, 3, '北');
+  composition.phase = 'composing';
+
+  composition = Core.compositionScroll(composition);
+  assert.equal(composition.phase, 'composing');
+  assert.deepEqual({ r: composition.rowId, c: composition.column }, { r: 42, c: 3 });
+  assert.equal(composition.value, '北');
+  assert.equal(composition.viewportGeneration, 1);
+
+  composition = Core.compositionRowsWillRecycle(composition, [40, 42, 44]);
+  assert.equal(composition.phase, 'composing');
+  assert.equal(composition.rowId, 42);
+  assert.equal(composition.column, 3);
+  assert.equal(composition.value, '北');
+  assert.equal(composition.coordinateWasRendered, true);
+  assert.equal(Core.editorKeyAction('ArrowDown', composition.phase === 'composing'), 'none');
+});
+
+test('refactor: shift selection survives crossing virtual-window recycling boundaries', () => {
+  const ids = Array.from({ length: 10000 }, (_, i) => i);
+  const selection = Core.createDataSelectionController(10);
+  selection.reset(0, 0);
+
+  selection.move(0, 9, ids, true);
+  selection.move(250, 0, ids, true);
+  assert.deepEqual(selection.state.focus, { r: 250, c: 9 });
+  assert.equal(selection.state.rowIds.length, 251);
+
+  const recycled = selection.rowsWillRecycle(Array.from({ length: 30 }, (_, i) => i));
+  assert.deepEqual(recycled.preservedRowIds.length, 30);
+  assert.equal(selection.state.rowIds.length, 251);
+  assert.ok(selection.isSelected(0, 0));
+  assert.ok(selection.isSelected(250, 9));
+  assert.ok(!selection.isSelected(251, 0));
+
+  const nextWindow = ids.slice(220, 260);
+  const moved = selection.move(0, 0, nextWindow, false);
+  assert.deepEqual(moved.focus, { r: 250, c: 9 });
+  assert.deepEqual(moved.rowIds, [250]);
+});
+
+test('refactor: frozen header geometry and scrolled editor geometry share coordinates', () => {
+  const widths = [100, 80, 120];
+  const metrics = Core.columnMetrics(widths);
+  assert.deepEqual(metrics.lefts, [0, 100, 180, 300]);
+
+  const frozen = Core.horizontalCellBounds({
+    column: 0,
+    cellLeft: metrics.lefts[0],
+    cellWidth: widths[0],
+    frozenWidth: widths[0],
+    scrollLeft: 260,
+  });
+  assert.deepEqual(frozen, { left: 0, width: 100, coveredByFrozenColumn: true });
+
+  const underFrozenColumn = Core.horizontalCellBounds({
+    column: 1,
+    cellLeft: metrics.lefts[1],
+    cellWidth: widths[1],
+    frozenWidth: widths[0],
+    scrollLeft: 50,
+  });
+  assert.deepEqual(underFrozenColumn, { left: 100, width: 30, coveredByFrozenColumn: false });
+
+  const normal = Core.horizontalCellBounds({
+    column: 2,
+    cellLeft: metrics.lefts[2],
+    cellWidth: widths[2],
+    frozenWidth: widths[0],
+    scrollLeft: 40,
+  });
+  assert.deepEqual(normal, { left: 140, width: 120, coveredByFrozenColumn: false });
+});
+
+test('refactor: empty table renders no rows and keeps a safe empty selection', () => {
+  const range = Core.visibleRange({
+    scrollTop: 9999,
+    viewportHeight: 500,
+    rowCount: 0,
+  });
+  assert.deepEqual(range, { start: 0, end: 0, offset: 0, totalHeight: 0 });
+
+  const selection = Core.createDataSelectionController(10);
+  selection.reset(0, 0);
+  const reconciled = selection.reconcile([]);
+  assert.deepEqual(reconciled, {
+    anchor: { r: 0, c: 0 },
+    focus: { r: 0, c: 0 },
+    rowIds: [],
+  });
+  assert.equal(selection.toTSV([]), '');
+  assert.equal(selection.move(1, 1, [], true), reconciled);
+});

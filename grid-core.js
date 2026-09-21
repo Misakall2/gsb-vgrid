@@ -95,6 +95,25 @@
     return next;
   }
 
+  /* Geometry shared by body cells, the sticky header, and the sticky first
+   * column. Keeping this pure prevents scroll offsets from becoming editor
+   * or composition state. */
+  function horizontalCellBounds(opts) {
+    const column = opts.column || 0;
+    const cellLeft = opts.cellLeft || 0;
+    const cellWidth = opts.cellWidth || 0;
+    const frozenWidth = opts.frozenWidth || 0;
+    const scrollLeft = opts.scrollLeft || 0;
+    if (column === 0) return { left: 0, width: cellWidth, coveredByFrozenColumn: true };
+    let left = cellLeft - scrollLeft;
+    let width = cellWidth;
+    if (left < frozenWidth) {
+      width = Math.max(0, width - (frozenWidth - left));
+      left = frozenWidth;
+    }
+    return { left: left, width: width, coveredByFrozenColumn: false };
+  }
+
   /* Selection lives purely as data ({anchor, focus}) so it survives DOM
    * recycling: re-rendered rows just re-ask isSelected(). */
   function createSelection(r, c) {
@@ -257,6 +276,93 @@
       c: linear % columnCount,
     };
     return { anchor: focus, focus: focus, rowIds: [focus.r] };
+  }
+
+  function createDataSelectionController(columnCount) {
+    let current = emptySelection();
+
+    return {
+      get state() {
+        return current;
+      },
+      replace: function (next) {
+        current = next || emptySelection();
+        return current;
+      },
+      reset: function (rowId, c) {
+        current = createDataSelection(rowId, c);
+        return current;
+      },
+      move: function (dr, dc, visibleRowIds, extend) {
+        current = moveDataSelection(current, dr, dc, visibleRowIds, columnCount, extend);
+        return current;
+      },
+      tab: function (visibleRowIds, backwards) {
+        current = tabNextData(current, visibleRowIds, columnCount, backwards);
+        return current;
+      },
+      collapse: function () {
+        current = createDataSelection(current.focus.r, current.focus.c);
+        return current;
+      },
+      reconcile: function (visibleRowIds) {
+        current = clampDataSelection(current, visibleRowIds, columnCount);
+        return current;
+      },
+      isSelected: function (rowId, c) {
+        return isSelected(current, rowId, c);
+      },
+      isActive: function (rowId, c) {
+        return current.focus.r === rowId && current.focus.c === c;
+      },
+      /* Recycling deliberately does not mutate data-coordinate selection.
+       * The renderer calls this so ownership is explicit; no DOM lookup is
+       * needed to preserve rows that have just left the window. */
+      rowsWillRecycle: function (rowIds) {
+        const removed = new Set(rowIds || []);
+        return {
+          preservedRowIds: selectionRowIds(current).filter(function (rowId) {
+            return removed.has(rowId);
+          }),
+        };
+      },
+      toTSV: function (data) {
+        return toTSV(data, current);
+      },
+    };
+  }
+
+  function createCompositionState(rowId, column, value) {
+    return {
+      phase: 'idle',
+      rowId: rowId,
+      column: column,
+      value: String(value == null ? '' : value),
+    };
+  }
+
+  function compositionScroll(state) {
+    /* A scroll event only versions the viewport. The IME phase and the data
+     * coordinate remain owned by the composition state. */
+    return {
+      phase: state.phase,
+      rowId: state.rowId,
+      column: state.column,
+      value: state.value,
+      viewportGeneration: (state.viewportGeneration || 0) + 1,
+    };
+  }
+
+  function compositionRowsWillRecycle(state, recycledRowIds) {
+    const recycled = new Set(recycledRowIds || []);
+    return {
+      phase: state.phase,
+      rowId: state.rowId,
+      column: state.column,
+      value: state.value,
+      viewportGeneration: state.viewportGeneration || 0,
+      coordinateWasRendered: recycled.has(state.rowId),
+    };
   }
 
   function filterRows(data, filters) {
@@ -457,6 +563,7 @@
     rowHeightAt: rowHeightAt,
     columnMetrics: columnMetrics,
     resizeColumn: resizeColumn,
+    horizontalCellBounds: horizontalCellBounds,
     createSelection: createSelection,
     createDataSelection: createDataSelection,
     normalizeSelection: normalizeSelection,
@@ -471,6 +578,10 @@
     encodeTSVCell: encodeTSVCell,
     emptySelection: emptySelection,
     clampDataSelection: clampDataSelection,
+    createDataSelectionController: createDataSelectionController,
+    createCompositionState: createCompositionState,
+    compositionScroll: compositionScroll,
+    compositionRowsWillRecycle: compositionRowsWillRecycle,
     filterRows: filterRows,
     groupRows: groupRows,
     layoutGroups: layoutGroups,
