@@ -88,7 +88,7 @@ html, body {
   position: absolute;
   left: 0;
   display: flex;
-  height: 32px;
+  min-height: 31px;
 }
 
 .group-header,
@@ -126,11 +126,13 @@ html, body {
 }
 
 .cell {
+  align-self: stretch;
+  display: block;
   flex: none;
   position: relative;
-  height: 32px;
-  line-height: 31px; /* 32 - 1px bottom border, keeps every baseline identical */
-  padding: 0 8px;
+  min-height: 32px;
+  line-height: 19px;
+  padding: 6px 8px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -141,12 +143,41 @@ html, body {
   user-select: none;
 }
 
+.header-row .cell,
+.group-header,
+.group-bar {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.cell[data-c="9"] {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  max-height: 50px;
+  overflow-y: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.header-row .cell[data-c="9"] {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
 /* Frozen first column: sticks to the left edge of the scrollport while the
    rest of the row scrolls underneath. Opaque background is required. */
 .cell.sticky {
   position: sticky;
   left: 0;
-  z-index: 10;
+  z-index: 15;
   background: #ffffff;
   border-right: 1px solid #dee0e3;
   font-weight: 500;
@@ -201,7 +232,7 @@ body.resizing-columns {
 
 /* Corner cell is frozen in both directions. */
 .header-row .cell.sticky {
-  z-index: 40;
+  z-index: 45;
   background: #f5f6f7;
 }
 
@@ -224,19 +255,14 @@ body.resizing-columns {
 
 input.editor {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
   margin: 0;
   padding: 0 7px;
   border: 2px solid #2f6fed;
   border-radius: 0;
   font: inherit;
-  line-height: 31px;
   background: #ffffff;
   outline: none;
-  z-index: 5;
+  z-index: 50;
 }
 
 .empty {

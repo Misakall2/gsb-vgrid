@@ -28,6 +28,18 @@ URL 参数可复现边界状态：
 node --test
 ```
 
+五起线上事故的浏览器层回归直接用本机 Chrome DevTools Protocol，不安装 npm 依赖：
+
+```sh
+node test/browser-regression.js
+```
+
+也可以把浏览器回归并入 Node 测试进程：
+
+```sh
+RUN_BROWSER_TEST=1 node --test
+```
+
 ## 交互
 
 - 纵向 / 横向滚动：未分组只渲染可视窗口内行；分组只渲染附近组头和行，滚动条按过滤 / 折叠后的行数计算

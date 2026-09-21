@@ -36,6 +36,51 @@
     return { start: start, end: end, offset: start * rowHeight, totalHeight: totalHeight };
   }
 
+  function rowHeightAt(rowHeights, rowId, fallback) {
+    const defaultHeight = fallback || ROW_H;
+    const h = rowHeights && Object.prototype.hasOwnProperty.call(rowHeights, rowId)
+      ? rowHeights[rowId]
+      : defaultHeight;
+    return Math.max(defaultHeight, Math.round(Number(h) || defaultHeight));
+  }
+
+  /* Variable-height rows use measured original data ids after filtering. */
+  function variableRowLayout(opts) {
+    const rowIds = opts.rowIds || [];
+    const fallback = opts.rowHeight || ROW_H;
+    const headerHeight = opts.headerHeight == null ? HEADER_H : opts.headerHeight;
+    const viewportHeight = opts.viewportHeight || 0;
+    const overscan = opts.overscan == null ? 4 : opts.overscan;
+    const tops = new Array(rowIds.length);
+    let rowsHeight = 0;
+    for (let i = 0; i < rowIds.length; i++) {
+      tops[i] = rowsHeight;
+      rowsHeight += rowHeightAt(opts.rowHeights, rowIds[i], fallback);
+    }
+    const totalHeight = headerHeight + rowsHeight;
+    const maxScroll = Math.max(0, totalHeight - viewportHeight);
+    const st = clamp(opts.scrollTop || 0, 0, maxScroll);
+    let start = 0;
+    while (start < rowIds.length &&
+      tops[start] + rowHeightAt(opts.rowHeights, rowIds[start], fallback) <= st) {
+      start++;
+    }
+    let end = start;
+    const bottom = st + Math.max(0, viewportHeight - headerHeight);
+    while (end < rowIds.length && tops[end] < bottom) end++;
+    start = clamp(start - overscan, 0, rowIds.length);
+    end = clamp(end + overscan, 0, rowIds.length);
+    return {
+      start: start,
+      end: end,
+      tops: tops,
+      rowsHeight: rowsHeight,
+      totalHeight: totalHeight,
+      maxScroll: maxScroll,
+      scrollTop: st,
+    };
+  }
+
   function columnMetrics(widths) {
     const lefts = [0];
     for (let i = 0; i < widths.length; i++) lefts.push(lefts[i] + widths[i]);
@@ -118,11 +163,43 @@
       const cells = [];
       for (let c = n.c1; c <= n.c2; c++) {
         const v = data[r] ? data[r][c] : null;
-        cells.push(v == null ? '' : String(v));
+        cells.push(encodeTSVCell(v == null ? '' : String(v)));
       }
       lines.push(cells.join('\t'));
     }
     return lines.join('\n');
+  }
+
+  function encodeTSVCell(value) {
+    const s = String(value == null ? '' : value);
+    if (s.indexOf('\t') === -1 && s.indexOf('\n') === -1 &&
+      s.indexOf('\r') === -1 && s.indexOf('"') === -1) {
+      return s;
+    }
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  function emptySelection() {
+    return { anchor: { r: 0, c: 0 }, focus: { r: 0, c: 0 }, rowIds: [] };
+  }
+
+  function clampDataSelection(selection, visibleIds, columnCount) {
+    if (!visibleIds.length || columnCount <= 0) return emptySelection();
+    const visibleSet = new Set(visibleIds);
+    const rowIds = (selection.rowIds || []).filter(function (id) {
+      return visibleSet.has(id);
+    });
+    const anchorRow = visibleSet.has(selection.anchor.r)
+      ? selection.anchor.r
+      : (selection.anchor.r < selection.focus.r ? rowIds[0] : rowIds[rowIds.length - 1]);
+    const focusRow = visibleSet.has(selection.focus.r)
+      ? selection.focus.r
+      : (selection.focus.r < selection.anchor.r ? rowIds[0] : rowIds[rowIds.length - 1]);
+    return {
+      anchor: { r: anchorRow, c: clamp(selection.anchor.c, 0, columnCount - 1) },
+      focus: { r: focusRow, c: clamp(selection.focus.c, 0, columnCount - 1) },
+      rowIds: rowIds,
+    };
   }
 
   function selectionRowIds(sel) {
@@ -152,11 +229,9 @@
     let c = clamp(sel.focus.c + dc, 0, columnCount - 1);
     let next = idx + dr;
     if (next < 0) {
-      next = 0;
-      c = 0;
+      next = idx;
     } else if (next >= visibleRowIds.length) {
-      next = visibleRowIds.length - 1;
-      c = columnCount - 1;
+      next = idx;
     }
     const focus = { r: visibleRowIds[next], c: c };
     if (!extend) return { anchor: focus, focus: focus, rowIds: [focus.r] };
@@ -221,19 +296,34 @@
     });
   }
 
-  function layoutGroups(groups, collapsed) {
+  function layoutGroups(groups, collapsed, rowHeights) {
     let top = 0;
     return groups.map(function (group, index) {
       const groupTop = top;
       const isCollapsed = !!(collapsed && collapsed.has && collapsed.has(group.key));
-      const height = GROUP_H + (isCollapsed ? 0 : group.count * ROW_H);
+      let rowsHeight = 0;
+      if (!isCollapsed) {
+        for (const rowId of group.rowIds) {
+          rowsHeight += rowHeightAt(rowHeights, rowId, ROW_H);
+        }
+      }
+      const height = GROUP_H + rowsHeight;
       const laid = Object.assign({}, group, {
         index: index,
         top: groupTop,
         height: height,
         bottom: groupTop + height,
         collapsed: isCollapsed,
-        rowTop: function (rowIndex) { return groupTop + GROUP_H + rowIndex * ROW_H; },
+        rowTop: function (rowIndex) {
+          let rowTop = groupTop + GROUP_H;
+          for (let i = 0; i < rowIndex; i++) {
+            rowTop += rowHeightAt(rowHeights, group.rowIds[i], ROW_H);
+          }
+          return rowTop;
+        },
+        rowHeightAt: function (rowIndex) {
+          return rowHeightAt(rowHeights, group.rowIds[rowIndex], ROW_H);
+        },
       });
       top = groupTop + height;
       return laid;
@@ -241,13 +331,13 @@
   }
 
   function visibleGroupedRows(opts) {
-    const groups = layoutGroups(opts.groups || [], opts.collapsed);
+    const groups = layoutGroups(opts.groups || [], opts.collapsed, opts.rowHeights);
     if (!groups.length) {
       return { items: [], groups: groups, currentGroup: null, totalHeight: 0, maxScroll: 0 };
     }
     const totalHeight = groups[groups.length - 1].bottom;
     const headerHeight = opts.headerHeight == null ? HEADER_H : opts.headerHeight;
-    const maxScroll = Math.max(0, totalHeight - Math.max(0, opts.viewportHeight - headerHeight));
+    const maxScroll = Math.max(0, totalHeight + headerHeight - opts.viewportHeight);
     const st = clamp(opts.scrollTop || 0, 0, maxScroll);
     const viewH = Math.max(ROW_H, opts.viewportHeight - headerHeight - GROUP_H);
     const overscan = opts.overscan == null ? 4 : opts.overscan;
@@ -267,10 +357,16 @@
           height: GROUP_H, count: group.count, collapsed: group.collapsed });
       }
       if (!group.collapsed) {
-        const localTop = st - group.top - GROUP_H;
-        const start = clamp(Math.floor(localTop / ROW_H) - overscan, 0, group.count);
-        const end = clamp(Math.ceil((localTop + viewH) / ROW_H) + overscan, 0, group.count);
-        for (let i = Math.max(0, start); i < Math.max(0, end); i++) {
+        let start = 0;
+        while (start < group.count &&
+          group.rowTop(start) + group.rowHeightAt(start) <= st) {
+          start++;
+        }
+        let end = start;
+        while (end < group.count && group.rowTop(end) < st + viewH) end++;
+        start = clamp(start - overscan, 0, group.count);
+        end = clamp(end + overscan, 0, group.count);
+        for (let i = start; i < end; i++) {
           items.push({ type: 'row', group: group.index, rowIndex: i,
             rowId: group.rowIds[i], top: group.rowTop(i) });
         }
@@ -357,6 +453,8 @@
     MIN_COL_WIDTH: MIN_COL_WIDTH,
     clamp: clamp,
     visibleRange: visibleRange,
+    variableRowLayout: variableRowLayout,
+    rowHeightAt: rowHeightAt,
     columnMetrics: columnMetrics,
     resizeColumn: resizeColumn,
     createSelection: createSelection,
@@ -370,6 +468,9 @@
     tabNextData: tabNextData,
     visibleFocus: visibleFocus,
     toTSV: toTSV,
+    encodeTSVCell: encodeTSVCell,
+    emptySelection: emptySelection,
+    clampDataSelection: clampDataSelection,
     filterRows: filterRows,
     groupRows: groupRows,
     layoutGroups: layoutGroups,

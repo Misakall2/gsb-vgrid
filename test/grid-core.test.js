@@ -295,3 +295,132 @@ test('column metrics: frozen and scrolling panes share the same coordinates', ()
   assert.deepEqual(metrics.lefts, [0, 120, 200, 400]);
   assert.equal(metrics.totalWidth, 400);
 });
+
+/* ---------- regression: virtual-row incidents ---------- */
+
+test('regression: shift selection at a vertical edge does not lose the last column', () => {
+  const ids = [3, 8, 11];
+  let sel = Core.createDataSelection(11, 3);
+  sel = Core.moveDataSelection(sel, -1, 0, ids, 4, true);
+  sel = Core.moveDataSelection(sel, -1, 0, ids, 4, true);
+  sel = Core.moveDataSelection(sel, -1, 0, ids, 4, true);
+  assert.deepEqual(sel.focus, { r: 3, c: 3 });
+  assert.deepEqual(sel.rowIds, [3, 8, 11]);
+  assert.ok(Core.isSelected(sel, 3, 3));
+  assert.ok(Core.isSelected(sel, 11, 3));
+
+  sel = Core.createDataSelection(3, 1);
+  sel = Core.moveDataSelection(sel, -1, 0, ids, 4, true);
+  assert.deepEqual(sel.focus, { r: 3, c: 1 });
+  assert.deepEqual(sel.rowIds, [3]);
+  assert.ok(!Core.isSelected(sel, 3, 0));
+});
+
+test('regression: TSV dimensions exactly match the selected data rectangle', () => {
+  const data = [
+    ['a', 'b', 'c'],
+    ['d', 'e', 'f'],
+    ['g', 'h', 'i'],
+  ];
+  const sel = {
+    anchor: { r: 0, c: 0 },
+    focus: { r: 2, c: 2 },
+    rowIds: [0, 1, 2],
+  };
+  const tsv = Core.toTSV(data, sel);
+  assert.equal(tsv, 'a\tb\tc\nd\te\tf\ng\th\ti');
+  const rows = tsv.split('\n');
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map((row) => row.split('\t').length), [3, 3, 3]);
+
+  const filteredSel = {
+    anchor: { r: 2, c: 0 },
+    focus: { r: 2, c: 2 },
+    rowIds: [2],
+  };
+  assert.deepEqual(Core.toTSV(data, filteredSel).split('\t'), ['g', 'h', 'i']);
+});
+
+test('regression: tabs, newlines and quotes in cells do not change TSV dimensions', () => {
+  const data = [['a\tb', 'line1\nline2', 'say "x"']];
+  const tsv = Core.toTSV(data, {
+    anchor: { r: 0, c: 0 },
+    focus: { r: 0, c: 2 },
+    rowIds: [0],
+  });
+  assert.equal(tsv, '"a\tb"\t"line1\nline2"\t"say ""x"""');
+  assert.ok(!tsv.endsWith('\t'));
+  const logicalRow = tsv
+    .replace('"line1\nline2"', '"line1 line2"')
+    .replace('"a\tb"', 'a b');
+  assert.equal(logicalRow.split('\t').length, 3);
+});
+
+test('regression: variable row layout keys heights by filtered data ids', () => {
+  const layout = Core.variableRowLayout({
+    rowIds: [10, 20, 30],
+    rowHeights: { 10: 48, 30: 64 },
+    scrollTop: 10,
+    viewportHeight: 100,
+    overscan: 0,
+  });
+  assert.deepEqual(layout.tops, [0, 48, 80]);
+  assert.equal(layout.rowsHeight, 48 + ROW_H + 64);
+  assert.equal(layout.totalHeight, Core.HEADER_H + layout.rowsHeight);
+  assert.equal(layout.start, 0);
+  assert.equal(layout.end, 2);
+});
+
+test('regression: grouped rows use measured heights for sticky rows and headers', () => {
+  const groups = [{ key: 'x', rowIds: [1, 2], count: 2 }];
+  const laid = Core.layoutGroups(groups, null, { 1: 48, 2: 64 });
+  assert.equal(laid[0].rowTop(1), Core.GROUP_H + 48);
+  assert.equal(laid[0].height, Core.GROUP_H + 48 + 64);
+});
+
+test('regression: stale scroll offset is reported so empty/single/reset views reposition first row', () => {
+  const empty = Core.variableRowLayout({
+    rowIds: [], scrollTop: 9999, viewportHeight: 500, overscan: 0,
+  });
+  assert.equal(empty.totalHeight, Core.HEADER_H);
+  assert.equal(empty.maxScroll, 0);
+  assert.equal(empty.scrollTop, 0);
+
+  const one = Core.variableRowLayout({
+    rowIds: [7], rowHeights: { 7: 48 }, scrollTop: 9999, viewportHeight: 500, overscan: 0,
+  });
+  assert.equal(one.scrollTop, 0);
+  assert.equal(one.totalHeight, Core.HEADER_H + 48);
+
+  const grouped = Core.visibleGroupedRows({
+    groups: [{ key: 'x', rowIds: [0], count: 1 }],
+    scrollTop: 9999,
+    viewportHeight: 500,
+    overscan: 0,
+  });
+  assert.equal(grouped.maxScroll, 0);
+});
+
+test('regression: selection reconciliation never leaves destroyed or out-of-view row ids highlighted', () => {
+  const sel = {
+    anchor: { r: 1, c: 1 },
+    focus: { r: 4, c: 3 },
+    rowIds: [1, 2, 3, 4],
+  };
+  const next = Core.clampDataSelection(sel, [2, 4], 5);
+  assert.deepEqual(next.anchor, { r: 2, c: 1 });
+  assert.deepEqual(next.focus, { r: 4, c: 3 });
+  assert.deepEqual(next.rowIds, [2, 4]);
+
+  assert.deepEqual(Core.clampDataSelection(sel, [], 5), {
+    anchor: { r: 0, c: 0 },
+    focus: { r: 0, c: 0 },
+    rowIds: [],
+  });
+});
+
+test('regression: an empty selection is safe before the first data row exists', () => {
+  const sel = Core.emptySelection();
+  assert.deepEqual(sel.rowIds, []);
+  assert.equal(Core.toTSV([], sel), '');
+});

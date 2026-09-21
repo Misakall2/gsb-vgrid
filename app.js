@@ -49,19 +49,46 @@
   let groups = null;
   let groupedView = null;
   let visibleRowIds = filteredRowIds;
+  let currentRowLayout = null;
+  const rowHeights = {};
   let sel = ROW_COUNT ? Core.createDataSelection(0, 0) : {
     anchor: { r: 0, c: 0 }, focus: { r: 0, c: 0 }, rowIds: [],
   };
   const rowEls = new Map();
   const groupEls = new Map();
   const editor = {
-    open: false, r: 0, c: 0, input: null, composing: false, commitOnBlur: false,
+    open: false, r: 0, c: 0, input: null, composing: false,
   };
 
   function colLeft(c) { return metrics.lefts[c]; }
   function visibleDataHeight() {
-    if (groupColumn == null) return filteredRowIds.length * ROW_H;
-    return groupedView ? groupedView.totalHeight : 0;
+    const measured = Object.keys(rowHeights).filter(function (id) {
+      return filteredRowIds.indexOf(Number(id)) !== -1;
+    }).reduce(function (sum, id) {
+      return sum + (rowHeights[id] - ROW_H);
+    }, 0);
+    return filteredRowIds.length * ROW_H + measured;
+  }
+
+  function ungroupedLayout(scrollTop) {
+    return Core.variableRowLayout({
+      rowIds: filteredRowIds,
+      rowHeights: rowHeights,
+      scrollTop: scrollTop == null ? grid.scrollTop : scrollTop,
+      viewportHeight: grid.clientHeight,
+    });
+  }
+
+  function resetScrollToStart() {
+    grid.scrollTop = 0;
+    grid.scrollLeft = 0;
+  }
+
+  function clampScrollPosition() {
+    const maxScrollTop = Math.max(0, canvas.offsetHeight - grid.clientHeight);
+    const maxScrollLeft = Math.max(0, canvas.offsetWidth - grid.clientWidth);
+    if (grid.scrollTop > maxScrollTop) grid.scrollTop = maxScrollTop;
+    if (grid.scrollLeft > maxScrollLeft) grid.scrollLeft = maxScrollLeft;
   }
 
   function rebuildModel(options) {
@@ -89,20 +116,14 @@
       visibleRowIds = filteredRowIds;
     }
     reconcileSelection();
-    if (!preserveScroll) grid.scrollTop = 0;
+    if (!preserveScroll) resetScrollToStart();
     layoutCanvas();
     render();
   }
 
   function reconcileSelection() {
     if (!sel || !sel.rowIds) return;
-    const visibleSet = new Set(visibleRowIds);
-    const rowIds = (sel.rowIds || []).filter(function (id) { return visibleSet.has(id); });
-    sel = {
-      anchor: { r: sel.anchor.r, c: sel.anchor.c },
-      focus: { r: sel.focus.r, c: sel.focus.c },
-      rowIds: rowIds,
-    };
+    sel = Core.clampDataSelection(sel, visibleRowIds, COL_COUNT);
   }
 
   function findRowInGroups(rowId) {
@@ -116,16 +137,9 @@
 
   function toggleGroup(key) {
     if (editor.composing) return;
-    editor.preserveHidden = editor.open;
-    editor.suspendBlur = editor.open;
     if (collapsed.has(key)) collapsed.delete(key);
     else collapsed.add(key);
     rebuildModel({ preserveScroll: true });
-    editor.suspendBlur = false;
-    if (editor.open && rowEls.has(editor.r)) {
-      mountEditor(rowEls.get(editor.r));
-      editor.input.focus();
-    }
   }
 
   function populateControls() {
@@ -137,6 +151,7 @@
   }
 
   filterColumnEl.addEventListener('change', function () {
+    if (editor.composing) return;
     filterColumn = Number(filterColumnEl.value);
     filterKeyword = filterInput.value.trim();
     rebuildModel();
@@ -155,16 +170,14 @@
     rebuildModel();
   });
   clearFilterEl.addEventListener('click', function () {
+    if (editor.composing) return;
     filterInput.value = '';
     filterKeyword = '';
     filterInput.focus();
     rebuildModel();
   });
   groupColumnEl.addEventListener('change', function () {
-    if (editor.composing) {
-      groupColumnEl.value = groupColumn == null ? '' : String(groupColumn);
-      return;
-    }
+    if (editor.composing) return;
     if (editor.open) commitEditor();
     groupColumn = groupColumnEl.value === '' ? null : Number(groupColumnEl.value);
     rebuildModel();
@@ -215,9 +228,14 @@
   function buildRow(item) {
     const rowId = item.rowId;
     const rowEl = document.createElement('div');
+    const isUnmeasured = !Object.prototype.hasOwnProperty.call(rowHeights, rowId);
+    const height = isUnmeasured ? ROW_H : Core.rowHeightAt(rowHeights, rowId, ROW_H);
     rowEl.className = 'row';
     rowEl.style.top = (HEADER_H + item.top) + 'px';
     rowEl.style.width = metrics.totalWidth + 'px';
+    rowEl.style.height = height + 'px';
+    rowEl.dataset.rowHeight = String(height);
+    if (isUnmeasured) rowEl.dataset.measuring = '1';
     for (let c = 0; c < COL_COUNT; c++) rowEl.appendChild(buildCell(rowId, c));
     return rowEl;
   }
@@ -259,7 +277,7 @@
   function renderUngrouped(range) {
     for (let r = range.start; r < range.end; r++) {
       const rowId = filteredRowIds[r];
-      const rowEl = buildRow({ rowId: rowId, top: r * ROW_H });
+      const rowEl = buildRow({ rowId: rowId, top: range.tops[r] });
       canvas.appendChild(rowEl);
       rowEls.set(rowId, rowEl);
     }
@@ -272,7 +290,10 @@
         canvas.appendChild(el);
         groupEls.set(item.key, el);
       } else {
-        const rowEl = buildRow(item);
+        const group = groupedView.groups[item.group];
+        const rowEl = buildRow(Object.assign({}, item, {
+          height: group.rowHeightAt(item.rowIndex),
+        }));
         canvas.appendChild(rowEl);
         rowEls.set(item.rowId, rowEl);
       }
@@ -297,33 +318,68 @@
 
   function render() {
     clearRows();
+    let measured = false;
     if (groupColumn == null) {
-      const range = Core.visibleRange({
-        scrollTop: grid.scrollTop,
-        viewportHeight: grid.clientHeight,
-        rowCount: filteredRowIds.length,
-      });
+      currentRowLayout = ungroupedLayout();
+      const range = currentRowLayout;
       renderUngrouped(range);
-      groupBar.hidden = true;
-      groupBar.replaceChildren();
+      measured = measureRenderedRowHeights();
     } else {
       groupedView = Core.visibleGroupedRows({
         groups: groups,
         collapsed: collapsed,
+        rowHeights: rowHeights,
         scrollTop: grid.scrollTop,
         viewportHeight: grid.clientHeight,
       });
       renderGrouped();
       renderGroupBar();
+      measured = measureRenderedRowHeights();
     }
-    if (editor.open) {
-      if (rowEls.has(editor.r)) mountEditor(rowEls.get(editor.r));
-      else if (!editor.preserveHidden) commitEditor();
+    if (measured) {
+      layoutCanvas();
+      render();
+      return;
     }
-    editor.preserveHidden = false;
+    if (editor.open) updateEditorPosition();
+    clampScrollPosition();
+    if (!visibleRowIds.length) resetScrollToStart();
     emptyEl.hidden = visibleRowIds.length !== 0;
     emptyEl.textContent = ROW_COUNT === 0 ? '暂无成交数据' : '没有符合筛选条件的数据';
     updateStatus();
+  }
+
+  function measureRenderedRowHeights() {
+    let changed = false;
+    rowEls.forEach(function (rowEl, rowId) {
+      const measuring = rowEl.dataset.measuring === '1';
+      rowEl.removeAttribute('data-measuring');
+      rowEl.style.height = '';
+      rowEl.style.minHeight = ROW_H + 'px';
+      const measuredHeight = rowEl.offsetHeight;
+      rowEl.style.minHeight = '';
+      rowEl.style.height = measuredHeight + 'px';
+      if (measuredHeight && measuredHeight !== rowHeights[rowId]) {
+        rowHeights[rowId] = measuredHeight;
+        changed = true;
+      }
+    });
+    return changed;
+  }
+
+  function rowTopForId(rowId) {
+    if (groupColumn != null) {
+      const found = findRowInGroups(rowId);
+      return found ? found.group.rowTop(found.rowIndex) : 0;
+    }
+    if (currentRowLayout) {
+      const index = filteredRowIds.indexOf(rowId);
+      if (index !== -1 && currentRowLayout.tops[index] != null) {
+        return currentRowLayout.tops[index];
+      }
+    }
+    const index = filteredRowIds.indexOf(rowId);
+    return index === -1 ? 0 : index * ROW_H;
   }
 
   function layoutCanvas() {
@@ -349,6 +405,12 @@
       el.style.width = 'max(' + metrics.totalWidth + 'px, 100%)';
     });
     if (groupedView) renderGroupBar();
+    const measured = measureRenderedRowHeights();
+    if (measured) {
+      render();
+    } else if (editor.open) {
+      updateEditorPosition();
+    }
   }
 
   function updateStatus() {
@@ -371,16 +433,18 @@
 
   function ensureVisible(rowId, c) {
     let top = 0;
+    let height = ROW_H;
     if (groupColumn != null) {
       const found = findRowInGroups(rowId);
       if (!found) return;
       top = found.group.rowTop(found.rowIndex);
+      height = found.group.rowHeightAt(found.rowIndex);
     } else {
-      const idx = filteredRowIds.indexOf(rowId);
-      if (idx === -1) return;
-      top = idx * ROW_H;
+      if (filteredRowIds.indexOf(rowId) === -1) return;
+      top = rowTopForId(rowId);
+      height = Core.rowHeightAt(rowHeights, rowId, ROW_H);
     }
-    const bottom = top + ROW_H;
+    const bottom = top + height;
     const viewTop = grid.scrollTop;
     const viewBottom = grid.scrollTop + grid.clientHeight - HEADER_H;
     if (top < viewTop) grid.scrollTop = top - GROUP_H;
@@ -433,6 +497,7 @@
 
   canvas.addEventListener('click', function (e) {
     if (e.target.closest('.group-header') || e.target.closest('.resize-handle')) return;
+    if (editor.composing) return;
     const cell = e.target.closest('.cell');
     if (!cell || headerEl.contains(cell)) return;
     const r = Number(cell.dataset.r);
@@ -445,6 +510,7 @@
   });
 
   canvas.addEventListener('dblclick', function (e) {
+    if (editor.composing) return;
     const cell = e.target.closest('.cell');
     if (!cell || headerEl.contains(cell)) return;
     const r = Number(cell.dataset.r);
@@ -460,13 +526,6 @@
     e.preventDefault();
   });
 
-  function mountEditor(rowEl) {
-    if (!rowEl || !editor.input) return;
-    const cell = rowEl.children[editor.c];
-    cell.classList.add('editing');
-    cell.appendChild(editor.input);
-  }
-
   function openEditor() {
     if (!visibleRowIds.length || editor.open) return;
     const r = sel.focus.r, c = sel.focus.c;
@@ -476,13 +535,13 @@
     editor.r = r;
     editor.c = c;
     editor.composing = false;
-    editor.commitOnBlur = false;
     const input = document.createElement('input');
     input.className = 'editor';
     input.value = data[r][c];
     editor.input = input;
     bindEditorEvents(input);
-    mountEditor(rowEls.get(r));
+    grid.appendChild(input);
+    updateEditorPosition();
     input.focus();
     input.select();
   }
@@ -492,7 +551,6 @@
     data[editor.r][editor.c] = editor.input.value;
     editor.open = false;
     editor.composing = false;
-    editor.commitOnBlur = false;
     editor.input.remove();
     editor.input = null;
   }
@@ -501,23 +559,51 @@
     if (!editor.open) return;
     editor.open = false;
     editor.composing = false;
-    editor.commitOnBlur = false;
     editor.input.remove();
     editor.input = null;
   }
 
+  function updateEditorPosition() {
+    if (!editor.open || !editor.input) return;
+    const c = editor.c;
+    const top = rowTopForId(editor.r);
+    const height = Core.rowHeightAt(rowHeights, editor.r, ROW_H);
+    let left = colLeft(c);
+    let width = widths[c];
+    if (c === 0) {
+      left = 0;
+    } else if (left < grid.scrollLeft + widths[0]) {
+      const overlap = grid.scrollLeft + widths[0] - left;
+      left += overlap;
+      width = Math.max(0, width - overlap);
+    }
+    editor.input.style.top = (HEADER_H + top - grid.scrollTop) + 'px';
+    editor.input.style.left = (left - grid.scrollLeft) + 'px';
+    editor.input.style.width = width + 'px';
+    editor.input.style.height = height + 'px';
+  }
+
+  function isComposingMousedown(e) {
+    return editor.composing && e.target !== editor.input;
+  }
+
+  document.addEventListener('mousedown', function (e) {
+    if (isComposingMousedown(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (editor.input) editor.input.focus();
+    }
+  }, true);
+
   function bindEditorEvents(input) {
     input.addEventListener('compositionstart', function () {
       editor.composing = true;
+      input.dataset.composing = '1';
     });
     input.addEventListener('compositionend', function () {
       editor.composing = false;
-      if (editor.commitOnBlur) {
-        editor.commitOnBlur = false;
-        commitEditor();
-        render();
-        grid.focus();
-      }
+      input.dataset.composing = '0';
+      updateEditorPosition();
     });
     input.addEventListener('keydown', function (e) {
       e.stopPropagation();
@@ -541,18 +627,12 @@
     });
     input.addEventListener('blur', function () {
       if (!editor.open) return;
-      if (editor.suspendBlur) return;
-      if (editor.composing) {
-        editor.commitOnBlur = true;
-        return;
-      }
       commitEditor();
       render();
     });
   }
 
-  /* Column resizing changes CSS dimensions only. Rows are not rebuilt, which
-     keeps a cell input mounted and lets an IME composition continue. */
+  /* Column resizing changes CSS dimensions only and relocates the persistent editor. */
   headerEl.addEventListener('pointerdown', function (e) {
     const handle = e.target.closest('.resize-handle');
     if (!handle) return;
