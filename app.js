@@ -1,5 +1,20 @@
-/* app.js - DOM layer: virtualized rendering, frozen panes, editing, keyboard. */
-/* global GridCore */
+/* app.js - composition root.
+ *
+ * Wires the four previously entangled concerns into explicit layers:
+ *
+ *   viewport.js       which slice is rendered + DOM recycling (scroll loop)
+ *      ^ notifications rowsRecycled(rowIds) / rowsMounted(rowEls)
+ *      |
+ *   selection-layer.js   selection as data (anchor/focus/rowIds); paints rows
+ *   editor.js            open editor + its own IME composition session
+ *
+ *   composition.js   pure IME state machine (no scroll flag near it)
+ *   freeze.js        one column coordinate system: header/frozen col/editor
+ *   grid-core.js     unchanged pure data/selection/layout math
+ *
+ * Nothing reaches for recycled DOM: recycling is pushed by the viewport.
+ */
+/* global GridCore, VGridViewport, VGridSelection, VGridFreeze, VGridEditor, VGridComposition */
 (function () {
   'use strict';
 
@@ -26,8 +41,6 @@
   const ROW_COUNT = isNaN(parsed) || parsed < 0 ? 0 : parsed;
 
   const data = Core.generateData(ROW_COUNT);
-  let widths = COLUMNS.map(function (col) { return col.width; });
-  let metrics = Core.columnMetrics(widths);
 
   const filterColumnEl = document.getElementById('filterColumn');
   const filterInput = document.getElementById('filterInput');
@@ -51,16 +64,20 @@
   let visibleRowIds = filteredRowIds;
   let currentRowLayout = null;
   const rowHeights = {};
-  let sel = ROW_COUNT ? Core.createDataSelection(0, 0) : {
-    anchor: { r: 0, c: 0 }, focus: { r: 0, c: 0 }, rowIds: [],
-  };
-  const rowEls = new Map();
-  const groupEls = new Map();
-  const editor = {
-    open: false, r: 0, c: 0, input: null, composing: false,
-  };
 
-  function colLeft(c) { return metrics.lefts[c]; }
+  const freeze = window.VGridFreeze.createFreezeLayer({
+    columns: COLUMNS,
+    headerEl: headerEl,
+    onResize: function () { relayoutVisibleRows(); },
+  });
+
+  const selection = window.VGridSelection.createSelectionLayer({
+    colCount: function () { return COL_COUNT; },
+    getVisibleRowIds: function () { return visibleRowIds; },
+    initialSelection: ROW_COUNT ? Core.createDataSelection(0, 0) : undefined,
+    onChange: function () {},
+  });
+
   function visibleDataHeight() {
     const measured = Object.keys(rowHeights).filter(function (id) {
       return filteredRowIds.indexOf(Number(id)) !== -1;
@@ -91,6 +108,269 @@
     if (grid.scrollLeft > maxScrollLeft) grid.scrollLeft = maxScrollLeft;
   }
 
+  function findRowInGroups(rowId) {
+    if (!groupedView) return null;
+    for (const group of groupedView.groups) {
+      const rowIndex = group.rowIds.indexOf(rowId);
+      if (rowIndex !== -1) return { group: group, rowIndex: rowIndex };
+    }
+    return null;
+  }
+
+  function rowTopForId(rowId) {
+    if (groupColumn != null) {
+      const found = findRowInGroups(rowId);
+      return found ? found.group.rowTop(found.rowIndex) : 0;
+    }
+    if (currentRowLayout) {
+      const index = filteredRowIds.indexOf(rowId);
+      if (index !== -1 && currentRowLayout.tops[index] != null) {
+        return currentRowLayout.tops[index];
+      }
+    }
+    const index = filteredRowIds.indexOf(rowId);
+    return index === -1 ? 0 : index * ROW_H;
+  }
+
+  function layoutCanvas() {
+    canvas.style.width = freeze.totalWidth() + 'px';
+    canvas.style.height = (HEADER_H + visibleDataHeight()) + 'px';
+    headerEl.style.width = freeze.totalWidth() + 'px';
+  }
+
+  /* ================= cell editor ================= */
+
+  const editor = window.VGridEditor.createCellEditor({
+    grid: grid,
+    geometry: function (cell) {
+      const top = rowTopForId(cell.r);
+      const height = Core.rowHeightAt(rowHeights, cell.r, ROW_H);
+      return freeze.editorBox(cell.c, grid, HEADER_H + top, height);
+    },
+    hooks: {
+      onCommit: function (result, action, shiftKey) {
+        data[result.r][result.c] = result.value;
+        if (action === 'commit-tab') selection.tab(shiftKey);
+        else if (action === 'commit-up') selection.move(-1, 0, false);
+        else if (action === 'commit-down') selection.move(1, 0, false);
+        else if (action === 'commit-left') selection.move(0, -1, false);
+        else if (action === 'commit-right') selection.move(0, 1, false);
+        afterMove();
+      },
+      onCancel: function () {
+        renderAll();
+        grid.focus();
+      },
+      onBlurCommit: function (result) {
+        data[result.r][result.c] = result.value;
+        renderAll();
+      },
+    },
+  });
+
+  /* ================= viewport node builders ================= */
+
+  function buildCell(rowId, c) {
+    const cell = document.createElement('div');
+    cell.className = 'cell' + (c === 0 ? ' sticky' : '');
+    cell.dataset.r = rowId;
+    cell.dataset.c = c;
+    freeze.applyCellLayout(cell, c);
+    return cell;
+  }
+
+  function paintCellContent(cell, rowId, c) {
+    cell.dataset.r = rowId;
+    cell.dataset.c = c;
+    cell.textContent = data[rowId][c];
+    const sel = selection.get();
+    cell.classList.toggle('selected', Core.isSelected(sel, rowId, c));
+    cell.classList.toggle('active', sel.focus.r === rowId && sel.focus.c === c);
+  }
+
+  function buildRowElement(item) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'row';
+    for (let c = 0; c < COL_COUNT; c++) rowEl.appendChild(buildCell(item.key, c));
+    return rowEl;
+  }
+
+  function updateRowElement(rowEl, item) {
+    const rowId = item.key;
+    const isUnmeasured = !Object.prototype.hasOwnProperty.call(rowHeights, rowId);
+    const height = isUnmeasured ? ROW_H : Core.rowHeightAt(rowHeights, rowId, ROW_H);
+    rowEl.style.top = (HEADER_H + item.top) + 'px';
+    rowEl.style.width = freeze.totalWidth() + 'px';
+    rowEl.style.height = height + 'px';
+    rowEl.dataset.rowHeight = String(height);
+    if (isUnmeasured) rowEl.dataset.measuring = '1';
+    for (let c = 0; c < rowEl.children.length; c++) {
+      freeze.applyCellLayout(rowEl.children[c], c);
+      paintCellContent(rowEl.children[c], rowId, c);
+    }
+  }
+
+  function appendGroupToggle(el, key) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'group-toggle';
+    button.textContent = collapsed.has(key) ? '▶' : '▼';
+    button.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    button.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleGroup(key);
+    });
+    el.appendChild(button);
+  }
+
+  function buildGroupElement(item) {
+    const group = groupedView.groups[item.groupIndex];
+    const el = document.createElement('div');
+    el.className = 'group-header';
+    el.style.top = (HEADER_H + item.top) + 'px';
+    el.style.width = 'max(' + freeze.totalWidth() + 'px, 100%)';
+    el.dataset.key = group.key;
+    appendGroupToggle(el, group.key);
+    const label = document.createElement('span');
+    label.textContent = group.key + ' · ' + group.count + ' 行';
+    el.appendChild(label);
+    return el;
+  }
+
+  /* Persisted group headers must refresh collapse state/count/width. */
+  function updateGroupElement(el, item) {
+    const group = groupedView.groups[item.groupIndex];
+    el.style.top = (HEADER_H + item.top) + 'px';
+    el.style.width = 'max(' + freeze.totalWidth() + 'px, 100%)';
+    const button = el.querySelector('.group-toggle');
+    if (button) button.textContent = group.collapsed ? '▶' : '▼';
+    const label = el.querySelector('span');
+    if (label) label.textContent = group.key + ' · ' + group.count + ' 行';
+  }
+
+  /* ================= virtual viewport ================= */
+
+  const viewport = window.VGridViewport.createViewport({
+    grid: grid,
+    canvas: canvas,
+    computeLayout: computeWindowItems,
+    buildRow: buildRowElement,
+    updateRow: updateRowElement,
+    buildGroup: buildGroupElement,
+    updateGroup: updateGroupElement,
+    onMeasuredHeights: function (rowId, measuredHeight) {
+      if (rowHeights[rowId] === measuredHeight) return false;
+      rowHeights[rowId] = measuredHeight;
+      return true;
+    },
+    onMeasurementsChanged: function () { layoutCanvas(); },
+    /* Runs after every viewport render, including the rAF-driven one after a
+     * scroll event: this is the same point at which the old single render()
+     * did its scroll clamping / empty-state bookkeeping. */
+    afterRender: afterViewportRender,
+  });
+  /* Recycling is pushed, never pulled: selection state survives destroyed
+   * ids untouched; the editor relocates from the geometry callback. */
+  viewport.subscribe(selection);
+  viewport.subscribe(editor);
+
+  /* Translate the current model into viewport items. The viewport stays
+   * ignorant of filtering/grouping/data semantics. */
+  function computeWindowItems() {
+    const items = [];
+    if (groupColumn == null) {
+      currentRowLayout = ungroupedLayout();
+      for (let r = currentRowLayout.start; r < currentRowLayout.end; r++) {
+        const rowId = filteredRowIds[r];
+        items.push({ kind: 'row', key: rowId, top: currentRowLayout.tops[r] });
+      }
+      return { items: items };
+    }
+    groupedView = Core.visibleGroupedRows({
+      groups: groups,
+      collapsed: collapsed,
+      rowHeights: rowHeights,
+      scrollTop: grid.scrollTop,
+      viewportHeight: grid.clientHeight,
+    });
+    for (const item of groupedView.items) {
+      if (item.type === 'group') {
+        items.push({
+          kind: 'group',
+          key: 'group:' + item.key,
+          groupIndex: item.group,
+          top: item.top,
+        });
+      } else {
+        items.push({ kind: 'row', key: item.rowId, top: item.top });
+      }
+    }
+    return { items: items };
+  }
+
+  function renderGroupBar() {
+    if (!groupedView || !groupedView.currentGroup) {
+      groupBar.hidden = true;
+      groupBar.replaceChildren();
+      return;
+    }
+    const group = groupedView.currentGroup;
+    groupBar.hidden = false;
+    groupBar.style.width = Math.max(freeze.totalWidth(), grid.clientWidth) + 'px';
+    groupBar.replaceChildren();
+    appendGroupToggle(groupBar, group.key);
+    const label = document.createElement('span');
+    label.textContent = group.key + ' · ' + group.count + ' 行';
+    groupBar.appendChild(label);
+  }
+
+  function updateStatus() {
+    const n = Core.normalizeSelection(selection.get());
+    const sel = selection.get();
+    const rows = (sel.rowIds || []).length || (visibleRowIds.length ? 1 : 0);
+    const cols = n.c2 - n.c1 + 1;
+    statusEl.textContent = visibleRowIds.length.toLocaleString() + ' / ' +
+      ROW_COUNT.toLocaleString() + ' 行' +
+      (visibleRowIds.length ? ' · 选区 ' + rows + ' 行 × ' + cols + ' 列' : '');
+  }
+
+  /* Full render after structural changes (filter/group/measurement loop). */
+  function renderAll() {
+    layoutCanvas();
+    viewport.render();
+    /* group bar / editor / scroll clamping / empty state are all handled in
+     * afterViewportRender, so scroll-driven renders get the same treatment. */
+  }
+
+  function afterViewportRender() {
+    renderGroupBar();
+    if (editor.isOpen()) editor.reposition();
+    clampScrollPosition();
+    /* No data at all: both scrollbars must collapse to zero even if the
+     * canvas still carries the fixed column width. */
+    if (!visibleRowIds.length) {
+      grid.scrollTop = 0;
+      grid.scrollLeft = 0;
+    }
+    emptyEl.hidden = visibleRowIds.length !== 0;
+    emptyEl.textContent = ROW_COUNT === 0 ? '暂无成交数据' : '没有符合筛选条件的数据';
+    updateStatus();
+  }
+
+  /* Width-only relayout while dragging a column resize handle. */
+  function relayoutVisibleRows() {
+    layoutCanvas();
+    freeze.relayoutHeaderCells();
+    viewport.rowNodes.forEach(function (rowEl) {
+      rowEl.style.width = freeze.totalWidth() + 'px';
+    });
+    viewport.render();
+    if (groupedView) renderGroupBar();
+    if (editor.isOpen()) editor.reposition();
+  }
+
+  /* ================= model changes ================= */
+
   function rebuildModel(options) {
     const preserveScroll = options && options.preserveScroll;
     const top = grid.scrollTop;
@@ -115,28 +395,13 @@
       groupedView = null;
       visibleRowIds = filteredRowIds;
     }
-    reconcileSelection();
+    selection.reconcile(visibleRowIds);
     if (!preserveScroll) resetScrollToStart();
-    layoutCanvas();
-    render();
-  }
-
-  function reconcileSelection() {
-    if (!sel || !sel.rowIds) return;
-    sel = Core.clampDataSelection(sel, visibleRowIds, COL_COUNT);
-  }
-
-  function findRowInGroups(rowId) {
-    if (!groupedView) return null;
-    for (const group of groupedView.groups) {
-      const rowIndex = group.rowIds.indexOf(rowId);
-      if (rowIndex !== -1) return { group: group, rowIndex: rowIndex };
-    }
-    return null;
+    renderAll();
   }
 
   function toggleGroup(key) {
-    if (editor.composing) return;
+    if (editor.isComposing()) return;
     if (collapsed.has(key)) collapsed.delete(key);
     else collapsed.add(key);
     rebuildModel({ preserveScroll: true });
@@ -150,286 +415,53 @@
     filterColumnEl.value = String(filterColumn);
   }
 
+  /* Filter input uses its own composition session: provisional pinyin never
+   * filters; only compositionend (and non-IME input) rebuilds the model. */
+  const filterIme = window.VGridComposition.createCompositionSession();
+  window.VGridComposition.bindComposition(filterInput, filterIme, function () {
+    filterKeyword = filterInput.value.trim();
+    rebuildModel();
+  });
+
   filterColumnEl.addEventListener('change', function () {
-    if (editor.composing) return;
+    if (editor.isComposing()) return;
     filterColumn = Number(filterColumnEl.value);
     filterKeyword = filterInput.value.trim();
     rebuildModel();
   });
-  filterInput.addEventListener('compositionstart', function () {
-    filterInput.dataset.composing = '1';
-  });
-  filterInput.addEventListener('compositionend', function () {
-    filterInput.dataset.composing = '0';
-    filterKeyword = filterInput.value.trim();
-    rebuildModel();
-  });
   filterInput.addEventListener('input', function () {
-    if (filterInput.dataset.composing === '1') return;
+    if (filterIme.isComposing()) return;
     filterKeyword = filterInput.value.trim();
     rebuildModel();
   });
   clearFilterEl.addEventListener('click', function () {
-    if (editor.composing) return;
+    if (editor.isComposing()) return;
     filterInput.value = '';
     filterKeyword = '';
     filterInput.focus();
     rebuildModel();
   });
   groupColumnEl.addEventListener('change', function () {
-    if (editor.composing) return;
-    if (editor.open) commitEditor();
+    if (editor.isComposing()) return;
+    if (editor.isOpen()) {
+      const result = editor.close(true);
+      if (result) data[result.r][result.c] = result.value;
+    }
     groupColumn = groupColumnEl.value === '' ? null : Number(groupColumnEl.value);
     rebuildModel();
   });
   clearGroupEl.addEventListener('click', function () {
-    if (editor.composing) return;
-    if (editor.open) commitEditor();
+    if (editor.isComposing()) return;
+    if (editor.isOpen()) {
+      const result = editor.close(true);
+      if (result) data[result.r][result.c] = result.value;
+    }
     groupColumn = null;
     groupColumnEl.value = '';
     rebuildModel();
   });
 
-  function buildHeader() {
-    headerEl.replaceChildren();
-    headerEl.style.width = metrics.totalWidth + 'px';
-    COLUMNS.forEach(function (col, i) {
-      const cell = document.createElement('div');
-      cell.className = 'cell' + (i === 0 ? ' sticky' : '');
-      applyCellLayout(cell, i);
-      cell.textContent = col.title;
-      const handle = document.createElement('span');
-      handle.className = 'resize-handle';
-      handle.title = '拖动调整列宽';
-      handle.dataset.c = String(i);
-      cell.appendChild(handle);
-      headerEl.appendChild(cell);
-    });
-  }
-
-  function applyCellLayout(cell, c) {
-    cell.style.width = widths[c] + 'px';
-    cell.style.minWidth = widths[c] + 'px';
-    cell.style.maxWidth = widths[c] + 'px';
-  }
-
-  function buildCell(rowId, c) {
-    const cell = document.createElement('div');
-    cell.className = 'cell' + (c === 0 ? ' sticky' : '');
-    cell.textContent = data[rowId][c];
-    cell.dataset.r = rowId;
-    cell.dataset.c = c;
-    applyCellLayout(cell, c);
-    if (Core.isSelected(sel, rowId, c)) cell.classList.add('selected');
-    if (sel.focus.r === rowId && sel.focus.c === c) cell.classList.add('active');
-    return cell;
-  }
-
-  function buildRow(item) {
-    const rowId = item.rowId;
-    const rowEl = document.createElement('div');
-    const isUnmeasured = !Object.prototype.hasOwnProperty.call(rowHeights, rowId);
-    const height = isUnmeasured ? ROW_H : Core.rowHeightAt(rowHeights, rowId, ROW_H);
-    rowEl.className = 'row';
-    rowEl.style.top = (HEADER_H + item.top) + 'px';
-    rowEl.style.width = metrics.totalWidth + 'px';
-    rowEl.style.height = height + 'px';
-    rowEl.dataset.rowHeight = String(height);
-    if (isUnmeasured) rowEl.dataset.measuring = '1';
-    for (let c = 0; c < COL_COUNT; c++) rowEl.appendChild(buildCell(rowId, c));
-    return rowEl;
-  }
-
-  function appendGroupToggle(el, group, key) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'group-toggle';
-    button.textContent = group.collapsed ? '▶' : '▼';
-    button.addEventListener('mousedown', function (e) { e.preventDefault(); });
-    button.addEventListener('click', function (e) {
-      e.stopPropagation();
-      toggleGroup(key);
-    });
-    el.appendChild(button);
-  }
-
-  function buildGroupHeader(item) {
-    const group = groupedView.groups[item.group];
-    const el = document.createElement('div');
-    el.className = 'group-header';
-    el.style.top = (HEADER_H + item.top) + 'px';
-    el.style.width = 'max(' + metrics.totalWidth + 'px, 100%)';
-    el.dataset.key = group.key;
-    appendGroupToggle(el, group, group.key);
-    const label = document.createElement('span');
-    label.textContent = group.key + ' · ' + group.count + ' 行';
-    el.appendChild(label);
-    return el;
-  }
-
-  function clearRows() {
-    rowEls.forEach(function (el) { el.remove(); });
-    groupEls.forEach(function (el) { el.remove(); });
-    rowEls.clear();
-    groupEls.clear();
-  }
-
-  function renderUngrouped(range) {
-    for (let r = range.start; r < range.end; r++) {
-      const rowId = filteredRowIds[r];
-      const rowEl = buildRow({ rowId: rowId, top: range.tops[r] });
-      canvas.appendChild(rowEl);
-      rowEls.set(rowId, rowEl);
-    }
-  }
-
-  function renderGrouped() {
-    for (const item of groupedView.items) {
-      if (item.type === 'group') {
-        const el = buildGroupHeader(item);
-        canvas.appendChild(el);
-        groupEls.set(item.key, el);
-      } else {
-        const group = groupedView.groups[item.group];
-        const rowEl = buildRow(Object.assign({}, item, {
-          height: group.rowHeightAt(item.rowIndex),
-        }));
-        canvas.appendChild(rowEl);
-        rowEls.set(item.rowId, rowEl);
-      }
-    }
-  }
-
-  function renderGroupBar() {
-    if (!groupedView || !groupedView.currentGroup) {
-      groupBar.hidden = true;
-      groupBar.replaceChildren();
-      return;
-    }
-    const group = groupedView.currentGroup;
-    groupBar.hidden = false;
-    groupBar.style.width = Math.max(metrics.totalWidth, grid.clientWidth) + 'px';
-    groupBar.replaceChildren();
-    appendGroupToggle(groupBar, group, group.key);
-    const label = document.createElement('span');
-    label.textContent = group.key + ' · ' + group.count + ' 行';
-    groupBar.appendChild(label);
-  }
-
-  function render() {
-    clearRows();
-    let measured = false;
-    if (groupColumn == null) {
-      currentRowLayout = ungroupedLayout();
-      const range = currentRowLayout;
-      renderUngrouped(range);
-      measured = measureRenderedRowHeights();
-    } else {
-      groupedView = Core.visibleGroupedRows({
-        groups: groups,
-        collapsed: collapsed,
-        rowHeights: rowHeights,
-        scrollTop: grid.scrollTop,
-        viewportHeight: grid.clientHeight,
-      });
-      renderGrouped();
-      renderGroupBar();
-      measured = measureRenderedRowHeights();
-    }
-    if (measured) {
-      layoutCanvas();
-      render();
-      return;
-    }
-    if (editor.open) updateEditorPosition();
-    clampScrollPosition();
-    if (!visibleRowIds.length) resetScrollToStart();
-    emptyEl.hidden = visibleRowIds.length !== 0;
-    emptyEl.textContent = ROW_COUNT === 0 ? '暂无成交数据' : '没有符合筛选条件的数据';
-    updateStatus();
-  }
-
-  function measureRenderedRowHeights() {
-    let changed = false;
-    rowEls.forEach(function (rowEl, rowId) {
-      const measuring = rowEl.dataset.measuring === '1';
-      rowEl.removeAttribute('data-measuring');
-      rowEl.style.height = '';
-      rowEl.style.minHeight = ROW_H + 'px';
-      const measuredHeight = rowEl.offsetHeight;
-      rowEl.style.minHeight = '';
-      rowEl.style.height = measuredHeight + 'px';
-      if (measuredHeight && measuredHeight !== rowHeights[rowId]) {
-        rowHeights[rowId] = measuredHeight;
-        changed = true;
-      }
-    });
-    return changed;
-  }
-
-  function rowTopForId(rowId) {
-    if (groupColumn != null) {
-      const found = findRowInGroups(rowId);
-      return found ? found.group.rowTop(found.rowIndex) : 0;
-    }
-    if (currentRowLayout) {
-      const index = filteredRowIds.indexOf(rowId);
-      if (index !== -1 && currentRowLayout.tops[index] != null) {
-        return currentRowLayout.tops[index];
-      }
-    }
-    const index = filteredRowIds.indexOf(rowId);
-    return index === -1 ? 0 : index * ROW_H;
-  }
-
-  function layoutCanvas() {
-    metrics = Core.columnMetrics(widths);
-    canvas.style.width = metrics.totalWidth + 'px';
-    canvas.style.height = (HEADER_H + visibleDataHeight()) + 'px';
-    headerEl.style.width = metrics.totalWidth + 'px';
-  }
-
-  function relayoutVisibleRows() {
-    metrics = Core.columnMetrics(widths);
-    headerEl.style.width = metrics.totalWidth + 'px';
-    canvas.style.width = metrics.totalWidth + 'px';
-    canvas.style.height = (HEADER_H + visibleDataHeight()) + 'px';
-    for (let c = 0; c < headerEl.children.length; c++) {
-      applyCellLayout(headerEl.children[c], c);
-    }
-    rowEls.forEach(function (rowEl) {
-      rowEl.style.width = metrics.totalWidth + 'px';
-      for (let c = 0; c < rowEl.children.length; c++) applyCellLayout(rowEl.children[c], c);
-    });
-    groupEls.forEach(function (el) {
-      el.style.width = 'max(' + metrics.totalWidth + 'px, 100%)';
-    });
-    if (groupedView) renderGroupBar();
-    const measured = measureRenderedRowHeights();
-    if (measured) {
-      render();
-    } else if (editor.open) {
-      updateEditorPosition();
-    }
-  }
-
-  function updateStatus() {
-    const n = Core.normalizeSelection(sel);
-    const rows = (sel.rowIds || []).length || (visibleRowIds.length ? 1 : 0);
-    const cols = n.c2 - n.c1 + 1;
-    statusEl.textContent = visibleRowIds.length.toLocaleString() + ' / ' + ROW_COUNT.toLocaleString() + ' 行' +
-      (visibleRowIds.length ? ' · 选区 ' + rows + ' 行 × ' + cols + ' 列' : '');
-  }
-
-  let ticking = false;
-  grid.addEventListener('scroll', function () {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () {
-      ticking = false;
-      render();
-    });
-  });
+  /* ================= navigation ================= */
 
   function ensureVisible(rowId, c) {
     let top = 0;
@@ -449,38 +481,38 @@
     const viewBottom = grid.scrollTop + grid.clientHeight - HEADER_H;
     if (top < viewTop) grid.scrollTop = top - GROUP_H;
     else if (bottom > viewBottom) grid.scrollTop = bottom - (grid.clientHeight - HEADER_H);
-
-    if (c > 0) {
-      const left = colLeft(c);
-      const right = left + widths[c];
-      const frozenW = widths[0];
-      const viewL = grid.scrollLeft + frozenW;
-      const viewR = grid.scrollLeft + grid.clientWidth;
-      if (left < viewL) grid.scrollLeft = left - frozenW;
-      else if (right > viewR) grid.scrollLeft = right - grid.clientWidth;
-    }
+    freeze.ensureColumnVisible(c, grid);
   }
 
   function afterMove() {
-    ensureVisible(sel.focus.r, sel.focus.c);
-    render();
+    const focus = selection.get().focus;
+    ensureVisible(focus.r, focus.c);
+    renderAll();
     grid.focus();
   }
 
   function move(dr, dc, extend) {
-    sel = Core.moveDataSelection(sel, dr, dc, visibleRowIds, COL_COUNT, extend);
+    selection.move(dr, dc, extend);
     afterMove();
   }
 
+  function openEditor() {
+    if (!visibleRowIds.length || editor.isOpen()) return;
+    const focus = selection.get().focus;
+    ensureVisible(focus.r, focus.c);
+    renderAll();
+    editor.open(focus.r, focus.c, data[focus.r][focus.c]);
+  }
+
   grid.addEventListener('keydown', function (e) {
-    if (editor.open) return;
+    if (editor.isOpen()) return;
     switch (e.key) {
       case 'ArrowUp': move(-1, 0, e.shiftKey); e.preventDefault(); break;
       case 'ArrowDown': move(1, 0, e.shiftKey); e.preventDefault(); break;
       case 'ArrowLeft': move(0, -1, e.shiftKey); e.preventDefault(); break;
       case 'ArrowRight': move(0, 1, e.shiftKey); e.preventDefault(); break;
       case 'Tab':
-        sel = Core.tabNextData(sel, visibleRowIds, COL_COUNT, e.shiftKey);
+        selection.tab(e.shiftKey);
         afterMove();
         e.preventDefault();
         break;
@@ -489,180 +521,58 @@
         e.preventDefault();
         break;
       case 'Escape':
-        sel = Core.createDataSelection(sel.focus.r, sel.focus.c);
-        render();
+        selection.collapseToFocus();
+        renderAll();
         break;
     }
   });
 
   canvas.addEventListener('click', function (e) {
     if (e.target.closest('.group-header') || e.target.closest('.resize-handle')) return;
-    if (editor.composing) return;
+    if (editor.isComposing()) return;
     const cell = e.target.closest('.cell');
     if (!cell || headerEl.contains(cell)) return;
     const r = Number(cell.dataset.r);
     const c = Number(cell.dataset.c);
     if (isNaN(r) || isNaN(c)) return;
-    if (editor.open && editor.r === r && editor.c === c) return;
-    sel = Core.createDataSelection(r, c);
-    render();
+    if (editor.isOpen() && editor.cell().r === r && editor.cell().c === c) return;
+    selection.select(r, c);
+    renderAll();
     grid.focus();
   });
 
   canvas.addEventListener('dblclick', function (e) {
-    if (editor.composing) return;
+    if (editor.isComposing()) return;
     const cell = e.target.closest('.cell');
     if (!cell || headerEl.contains(cell)) return;
     const r = Number(cell.dataset.r);
     const c = Number(cell.dataset.c);
     if (isNaN(r) || isNaN(c)) return;
-    sel = Core.createDataSelection(r, c);
+    selection.select(r, c);
     openEditor();
   });
 
   document.addEventListener('copy', function (e) {
-    if (editor.open || document.activeElement !== grid) return;
-    e.clipboardData.setData('text/plain', Core.toTSV(data, sel));
+    if (editor.isOpen() || document.activeElement !== grid) return;
+    e.clipboardData.setData('text/plain', Core.toTSV(data, selection.get()));
     e.preventDefault();
   });
 
-  function openEditor() {
-    if (!visibleRowIds.length || editor.open) return;
-    const r = sel.focus.r, c = sel.focus.c;
-    ensureVisible(r, c);
-    render();
-    editor.open = true;
-    editor.r = r;
-    editor.c = c;
-    editor.composing = false;
-    const input = document.createElement('input');
-    input.className = 'editor';
-    input.value = data[r][c];
-    editor.input = input;
-    bindEditorEvents(input);
-    grid.appendChild(input);
-    updateEditorPosition();
-    input.focus();
-    input.select();
-  }
-
-  function commitEditor() {
-    if (!editor.open) return;
-    data[editor.r][editor.c] = editor.input.value;
-    editor.open = false;
-    editor.composing = false;
-    editor.input.remove();
-    editor.input = null;
-  }
-
-  function cancelEditor() {
-    if (!editor.open) return;
-    editor.open = false;
-    editor.composing = false;
-    editor.input.remove();
-    editor.input = null;
-  }
-
-  function updateEditorPosition() {
-    if (!editor.open || !editor.input) return;
-    const c = editor.c;
-    const top = rowTopForId(editor.r);
-    const height = Core.rowHeightAt(rowHeights, editor.r, ROW_H);
-    let left = colLeft(c);
-    let width = widths[c];
-    if (c === 0) {
-      left = 0;
-    } else if (left < grid.scrollLeft + widths[0]) {
-      const overlap = grid.scrollLeft + widths[0] - left;
-      left += overlap;
-      width = Math.max(0, width - overlap);
-    }
-    editor.input.style.top = (HEADER_H + top - grid.scrollTop) + 'px';
-    editor.input.style.left = (left - grid.scrollLeft) + 'px';
-    editor.input.style.width = width + 'px';
-    editor.input.style.height = height + 'px';
-  }
-
-  function isComposingMousedown(e) {
-    return editor.composing && e.target !== editor.input;
-  }
-
+  /* IME guard: pointer elsewhere during composition is swallowed and focus
+   * is returned to the composing input. */
   document.addEventListener('mousedown', function (e) {
-    if (isComposingMousedown(e)) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (editor.input) editor.input.focus();
-    }
+    editor.guardExternalPointer(e);
   }, true);
 
-  function bindEditorEvents(input) {
-    input.addEventListener('compositionstart', function () {
-      editor.composing = true;
-      input.dataset.composing = '1';
-    });
-    input.addEventListener('compositionend', function () {
-      editor.composing = false;
-      input.dataset.composing = '0';
-      updateEditorPosition();
-    });
-    input.addEventListener('keydown', function (e) {
-      e.stopPropagation();
-      const composing = editor.composing || e.isComposing;
-      const action = Core.editorKeyAction(e.key, composing);
-      if (action === 'none') return;
-      e.preventDefault();
-      if (action === 'cancel') {
-        cancelEditor();
-        render();
-        grid.focus();
-        return;
-      }
-      commitEditor();
-      if (action === 'commit-tab') sel = Core.tabNextData(sel, visibleRowIds, COL_COUNT, e.shiftKey);
-      else if (action === 'commit-up') sel = Core.moveDataSelection(sel, -1, 0, visibleRowIds, COL_COUNT, false);
-      else if (action === 'commit-down') sel = Core.moveDataSelection(sel, 1, 0, visibleRowIds, COL_COUNT, false);
-      else if (action === 'commit-left') sel = Core.moveDataSelection(sel, 0, -1, visibleRowIds, COL_COUNT, false);
-      else if (action === 'commit-right') sel = Core.moveDataSelection(sel, 0, 1, visibleRowIds, COL_COUNT, false);
-      afterMove();
-    });
-    input.addEventListener('blur', function () {
-      if (!editor.open) return;
-      commitEditor();
-      render();
-    });
-  }
-
-  /* Column resizing changes CSS dimensions only and relocates the persistent editor. */
-  headerEl.addEventListener('pointerdown', function (e) {
-    const handle = e.target.closest('.resize-handle');
-    if (!handle) return;
-    e.preventDefault();
-    const c = Number(handle.dataset.c);
-    const startX = e.clientX;
-    const startWidth = widths[c];
-    document.body.classList.add('resizing-columns');
-
-    function onMove(ev) {
-      widths = Core.resizeColumn(widths, c, ev.clientX - startX, Core.MIN_COL_WIDTH);
-      if (widths[c] === startWidth) return;
-      relayoutVisibleRows();
-    }
-    function onUp() {
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
-      document.body.classList.remove('resizing-columns');
-    }
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-  });
+  freeze.bindColumnResize(grid);
 
   window.addEventListener('resize', function () {
     if (groupedView) renderGroupBar();
   });
 
   populateControls();
-  buildHeader();
+  freeze.buildHeader();
   layoutCanvas();
   emptyEl.hidden = ROW_COUNT !== 0;
-  render();
+  renderAll();
 })();
