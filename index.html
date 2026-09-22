@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>成交数据 - 虚拟表格</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
   <div class="toolbar">
@@ -27,12 +27,12 @@
     <div id="canvas" class="canvas">
       <div id="header" class="row header-row"></div>
       <div id="groupBar" class="group-bar" hidden></div>
-      <!-- visible rows are rendered here by app.js -->
+      <!-- visible rows are rendered here by src/app.js -->
     </div>
     <div id="empty" class="empty" hidden>暂无成交数据</div>
   </div>
-  <script src="grid-core.js"></script>
-  <script src="grid-view.js"></script>
-  <script src="app.js"></script>
+  <script src="./src/core/grid-core.js"></script>
+  <script src="./src/ui/grid-view.js"></script>
+  <script src="./src/app.js"></script>
 </body>
 </html>

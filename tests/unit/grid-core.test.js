@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Core = require('../grid-core.js');
+const Core = require('../../src/core/grid-core.js');
 
 const ROW_H = Core.ROW_H;
 
@@ -50,6 +50,63 @@ test('visibleRange: overscan extends but never leaves data bounds', () => {
   assert.equal(top.start, 0);
   const bottom = Core.visibleRange({ scrollTop: 1e9, viewportHeight: 320, rowCount: 10000, overscan: 4 });
   assert.equal(bottom.end, 10000);
+});
+
+test('engineering: visibleRange keeps the released row-count semantics for 0, 1 and 10000', () => {
+  const viewportHeight = 500;
+  const cases = [
+    {
+      rowCount: 0,
+      scrollTop: 0,
+      expected: { start: 0, end: 0, offset: 0, totalHeight: 0 },
+    },
+    {
+      rowCount: 0,
+      scrollTop: 1,
+      expected: { start: 0, end: 0, offset: 0, totalHeight: 0 },
+    },
+    {
+      rowCount: 1,
+      scrollTop: 0,
+      expected: { start: 0, end: 1, offset: 0, totalHeight: ROW_H },
+    },
+    {
+      rowCount: 1,
+      scrollTop: 1,
+      expected: { start: 0, end: 1, offset: 0, totalHeight: ROW_H },
+    },
+    {
+      rowCount: 10000,
+      scrollTop: 0,
+      expected: { start: 0, end: 20, offset: 0, totalHeight: 10000 * ROW_H },
+    },
+    {
+      rowCount: 10000,
+      scrollTop: 1,
+      expected: { start: 0, end: 20, offset: 0, totalHeight: 10000 * ROW_H },
+    },
+    {
+      rowCount: 10000,
+      scrollTop: 100 * ROW_H,
+      expected: { start: 96, end: 120, offset: 96 * ROW_H, totalHeight: 10000 * ROW_H },
+    },
+    {
+      rowCount: 10000,
+      scrollTop: 1e9,
+      expected: { start: 9980, end: 10000, offset: 9980 * ROW_H, totalHeight: 10000 * ROW_H },
+    },
+  ];
+
+  for (const item of cases) {
+    const actual = Core.visibleRange({
+      scrollTop: item.scrollTop,
+      viewportHeight,
+      rowCount: item.rowCount,
+    });
+    assert.deepEqual(actual, item.expected,
+      `rowCount=${item.rowCount}, scrollTop=${item.scrollTop}`);
+    assert.equal(actual.offset, actual.start * ROW_H);
+  }
 });
 
 /* ---------- selection model ---------- */

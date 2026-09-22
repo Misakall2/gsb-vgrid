@@ -1,62 +1,63 @@
 # gsb-vgrid
 
-一万行成交明细的虚拟滚动表格。原生 HTML / CSS / JS，无 npm、无框架、无打包器。
+一万行成交明细虚拟滚动表格。原生 HTML / CSS / JavaScript，无业务 npm 包、无 React、无 webpack、无打包产物。
 
-## 打开页面
+## 唯一命令
 
-直接双击 `index.html` 即可（`file://` 下可用，复制功能走 `copy` 事件，不依赖剪贴板权限）。
-也可以起个静态服务：
+启动本地静态页，在仓库根目录执行：
 
 ```sh
 python3 -m http.server 8000
-# 打开 http://localhost:8000
 ```
 
-URL 参数可复现边界状态：
+然后打开 `http://localhost:8000/index.html`。
 
-- `index.html` 默认 10,000 行
-- `index.html?rows=0` 空表状态
-- `index.html?rows=1` 单行状态
-- 工具栏可按列分组、折叠组、按列关键字筛选；输入无匹配关键字可复现零行状态
-
-## 跑测试
-
-纯函数逻辑（可视窗口计算、选区模型、TSV、输入法按键状态机、数据生成）在
-`grid-core.js`，用 Node 自带测试运行器，无需安装任何依赖：
+运行纯逻辑测试，在仓库根目录执行：
 
 ```sh
-node --test
+node scripts/test.mjs
 ```
 
-五起线上事故的浏览器层回归直接用本机 Chrome DevTools Protocol，不安装 npm 依赖：
+本地和 GitHub Actions 都使用这一条测试命令。它只使用 Node 自带 test runner，不执行 `npm install`，也不需要 `node_modules`。需要 Node.js 20 或更新版本；版本过低、关键文件缺失或页面运行时引用缺失时会直接输出可读错误。
+
+## 页面状态
+
+在静态服务下使用这些 URL 复现边界状态：
+
+- `index.html`：默认 10,000 行
+- `index.html?rows=0`：空表
+- `index.html?rows=1`：单行
+
+工具栏可以按列分组、折叠组、按列筛选；输入无匹配关键字可复现零行状态。
+
+## 手测补充
+
+纯逻辑测试覆盖窗口计算、数据坐标选区、TSV、IME 按键状态、过滤分组和冻列几何。页面交互另提供本机 Chrome / Chromium 回归脚本，不进 CI，也不会被纯逻辑测试加载：
 
 ```sh
-node test/browser-regression.js
+node tests/manual/browser-regression.manual.js
 ```
 
-也可以把浏览器回归并入 Node 测试进程：
+该脚本使用 Chrome DevTools Protocol，不安装任何包；没有本机 Chrome / Chromium 时会报出找不到浏览器。
 
-```sh
-RUN_BROWSER_TEST=1 node --test
-```
+## 目录
 
-## 交互
+- `index.html`：唯一页面入口
+- `src/core/grid-core.js`：虚拟滚动、选区、IME 状态、过滤分组、冻列几何等纯逻辑
+- `src/ui/grid-view.js`：DOM 渲染协作层
+- `src/app.js`：页面事件和应用装配
+- `src/style.css`：sticky 冻列、基线对齐和选区样式
+- `tests/unit/grid-core.test.js`：Node 无浏览器纯逻辑测试
+- `tests/manual/browser-regression.manual.js`：可选浏览器手测/回归脚本
+- `scripts/test.mjs`：唯一纯逻辑测试入口和环境预检
+- `.github/workflows/test.yml`：干净 Ubuntu 上的 CI 配置
 
-- 纵向 / 横向滚动：未分组只渲染可视窗口内行；分组只渲染附近组头和行，滚动条按过滤 / 折叠后的行数计算
-- 表头、首列冻结，组头冻结在表头下方；滚过组边界会切换为下一组
-- 表头右缘可拖动列宽；首列宽度变化后，横向滚动仍按同一套列坐标对齐
-- 筛选 / 分组 / 折叠后的选区和编辑器都保存原始数据行号，不绑定屏幕行号
-- 单击选中，双击或回车进入编辑；中文输入法组字期间方向键 / 回车不会提交，
-  筛选框等 `compositionend` 后才过滤；折叠 / 展开组不丢正在编辑的坐标
-- 方向键移动，`Shift+方向键` 拉选区，`Tab` / `Shift+Tab` 前后移动，
-  `Esc` 收起选区（编辑中 `Esc` 取消编辑）
-- `Cmd/Ctrl+C` 把当前选区以 TSV 复制到剪贴板；筛选后按过滤结果顺序复制
-- 选区存在数据层，滚动回收 DOM 后滚回来高亮仍在
+## 现有行为
 
-## 文件
-
-- `index.html` 页面结构
-- `style.css` 样式（sticky 冻结、基线对齐、选区高亮）
-- `grid-core.js` 纯逻辑，浏览器和 Node 共用，含筛选、分组布局、数据坐标选区和列宽计算
-- `app.js` DOM 渲染与事件
-- `test/grid-core.test.js` `node:test` 单测
+- 纵向 / 横向滚动时只渲染可视窗口附近的 DOM，滚动条仍按完整过滤结果计算。
+- 表头和首列冻结，组头固定在表头下方，滚过组边界后切换当前组。
+- 首列宽度变化后，横向滚动和编辑器仍使用同一套列坐标。
+- 筛选、分组、折叠后的选区和编辑器保存原始数据行号，不绑定屏幕行号。
+- IME 组字期间方向键、回车、Tab 不会提交或移动；滚动回收 DOM 不销毁组字状态。
+- `Shift+方向键` 拉选区，`Tab` / `Shift+Tab` 移动，`Cmd/Ctrl+C` 按当前过滤顺序复制 TSV。
+- 窗口计算在 0、1、10,000 行以及顶部、一像素偏移、中部、越界快速滚动位置都有固定语义断言。
