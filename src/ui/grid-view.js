@@ -1,4 +1,4 @@
-/* grid-view.js - internal DOM collaborators for the classic file:// build. */
+/* src/ui/grid-view.js - DOM collaborators for the static browser build. */
 /* global GridCore */
 (function (root) {
   'use strict';

@@ -7,7 +7,7 @@ const { join, extname } = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const root = join(__dirname, '..');
+const root = join(__dirname, '..', '..');
 const chromeCandidates = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/usr/bin/google-chrome',

@@ -1,4 +1,4 @@
-/* app.js - application wiring: DOM collaborates through explicit state. */
+/* src/ui/app.js - application wiring: DOM collaborates through explicit state. */
 /* global GridCore, GridView */
 (function () {
   'use strict';

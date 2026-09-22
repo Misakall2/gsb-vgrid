@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const Core = require('../grid-core.js');
+const Core = require('../../src/core/grid-core.js');
 
 const ROW_H = Core.ROW_H;
 
@@ -50,6 +50,61 @@ test('visibleRange: overscan extends but never leaves data bounds', () => {
   assert.equal(top.start, 0);
   const bottom = Core.visibleRange({ scrollTop: 1e9, viewportHeight: 320, rowCount: 10000, overscan: 4 });
   assert.equal(bottom.end, 10000);
+});
+
+test('engineering: zero, one, and 10000-row windows keep the established offsets', () => {
+  const viewportHeight = 20 * ROW_H;
+  const windowAt = (rowCount, scrollTop) => Core.visibleRange({
+    scrollTop,
+    viewportHeight,
+    rowCount,
+    overscan: 0,
+  });
+
+  assert.deepEqual(windowAt(0, 0), {
+    start: 0,
+    end: 0,
+    offset: 0,
+    totalHeight: 0,
+  });
+
+  assert.deepEqual(windowAt(1, 0), {
+    start: 0,
+    end: 1,
+    offset: 0,
+    totalHeight: ROW_H,
+  });
+  assert.deepEqual(windowAt(1, 10000 * ROW_H), {
+    start: 0,
+    end: 1,
+    offset: 0,
+    totalHeight: ROW_H,
+  });
+
+  assert.deepEqual(windowAt(10000, 0), {
+    start: 0,
+    end: 20,
+    offset: 0,
+    totalHeight: 10000 * ROW_H,
+  });
+  assert.deepEqual(windowAt(10000, 5000 * ROW_H), {
+    start: 5000,
+    end: 5020,
+    offset: 5000 * ROW_H,
+    totalHeight: 10000 * ROW_H,
+  });
+  assert.deepEqual(windowAt(10000, 9980 * ROW_H), {
+    start: 9980,
+    end: 10000,
+    offset: 9980 * ROW_H,
+    totalHeight: 10000 * ROW_H,
+  });
+  assert.deepEqual(windowAt(10000, Number.MAX_SAFE_INTEGER), {
+    start: 9980,
+    end: 10000,
+    offset: 9980 * ROW_H,
+    totalHeight: 10000 * ROW_H,
+  });
 });
 
 /* ---------- selection model ---------- */

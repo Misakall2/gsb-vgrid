@@ -1,62 +1,49 @@
 # gsb-vgrid
 
-一万行成交明细的虚拟滚动表格。原生 HTML / CSS / JS，无 npm、无框架、无打包器。
+一万行成交明细的原生虚拟滚动表格。项目没有业务 npm 包、没有 React、没有 webpack，也不需要安装依赖。
 
-## 打开页面
+## 唯一页面入口
 
-直接双击 `index.html` 即可（`file://` 下可用，复制功能走 `copy` 事件，不依赖剪贴板权限）。
-也可以起个静态服务：
-
-```sh
-python3 -m http.server 8000
-# 打开 http://localhost:8000
-```
-
-URL 参数可复现边界状态：
-
-- `index.html` 默认 10,000 行
-- `index.html?rows=0` 空表状态
-- `index.html?rows=1` 单行状态
-- 工具栏可按列分组、折叠组、按列关键字筛选；输入无匹配关键字可复现零行状态
-
-## 跑测试
-
-纯函数逻辑（可视窗口计算、选区模型、TSV、输入法按键状态机、数据生成）在
-`grid-core.js`，用 Node 自带测试运行器，无需安装任何依赖：
+页面入口固定为仓库根目录的 `index.html`。在仓库根目录运行：
 
 ```sh
-node --test
+python3 -m http.server 8000 --directory .
 ```
 
-五起线上事故的浏览器层回归直接用本机 Chrome DevTools Protocol，不安装 npm 依赖：
+然后打开 `http://127.0.0.1:8000/index.html`。
+
+页面资源全部使用相对路径，因此把整个仓库挂到子路径（例如 `/demo/vgrid/`）时，脚本和样式仍从同一子路径加载。
+
+## 纯逻辑测试
+
+本地和 CI 都运行同一条命令：
 
 ```sh
-node test/browser-regression.js
+node scripts/test.mjs
 ```
 
-也可以把浏览器回归并入 Node 测试进程：
+要求 Node.js 18 或更新版本。脚本使用 Node 自带的 `node:test`，不会执行 `npm install`，仓库也没有业务依赖。Node 版本过低或必要文件缺失时会直接打印可读错误。
 
-```sh
-RUN_BROWSER_TEST=1 node --test
-```
+## 目录约定
 
-## 交互
+- `index.html`：唯一页面入口。
+- `src/core/grid-core.js`：无 DOM 的数据层，包含虚拟窗口、冻列坐标、数据坐标选区、TSV、IME 按键状态、筛选和分组布局。
+- `src/ui/`：只由浏览器页面加载的 DOM、样式和事件接线。
+- `test/logic/`：无浏览器 Node 测试，CI 只运行这里的纯逻辑测试。
+- `test/manual/`：可选浏览器回归脚本，不会被页面加载，也不会进入 CI 命令。
+- `scripts/test.mjs`：本地与 CI 共用的测试入口和环境检查。
 
-- 纵向 / 横向滚动：未分组只渲染可视窗口内行；分组只渲染附近组头和行，滚动条按过滤 / 折叠后的行数计算
-- 表头、首列冻结，组头冻结在表头下方；滚过组边界会切换为下一组
-- 表头右缘可拖动列宽；首列宽度变化后，横向滚动仍按同一套列坐标对齐
-- 筛选 / 分组 / 折叠后的选区和编辑器都保存原始数据行号，不绑定屏幕行号
-- 单击选中，双击或回车进入编辑；中文输入法组字期间方向键 / 回车不会提交，
-  筛选框等 `compositionend` 后才过滤；折叠 / 展开组不丢正在编辑的坐标
-- 方向键移动，`Shift+方向键` 拉选区，`Tab` / `Shift+Tab` 前后移动，
-  `Esc` 收起选区（编辑中 `Esc` 取消编辑）
-- `Cmd/Ctrl+C` 把当前选区以 TSV 复制到剪贴板；筛选后按过滤结果顺序复制
-- 选区存在数据层，滚动回收 DOM 后滚回来高亮仍在
+## 覆盖范围
 
-## 文件
+`test/logic/grid-core.test.js` 在纯 Node 环境覆盖：
 
-- `index.html` 页面结构
-- `style.css` 样式（sticky 冻结、基线对齐、选区高亮）
-- `grid-core.js` 纯逻辑，浏览器和 Node 共用，含筛选、分组布局、数据坐标选区和列宽计算
-- `app.js` DOM 渲染与事件
-- `test/grid-core.test.js` `node:test` 单测
+- 总行数 0、1、10000 的窗口起点、终点、像素偏移和总高度。
+- 快速滚动到底部时的偏移钳制。
+- 筛选、分组和虚拟行回收后仍以原始数据行 ID 保存选区。
+- IME 组字期间 Enter、Tab、Esc、方向键不提交或移动。
+- 冻列、表头和编辑器共用的横向坐标计算。
+- TSV 复制、列宽、分组高度和数据生成的既有语义。
+
+`test/logic/page-contract.test.js` 校验页面只通过相对 URL 加载 `src/` 运行时资源，不加载 `test/` 文件、绝对本机路径或 `node_modules`。
+
+浏览器交互的手工检查和可选 CDP 回归见 [docs/manual-testing.md](docs/manual-testing.md)。这些检查不是 CI 的替代品。
